@@ -32,7 +32,7 @@ PROTO_ACK = ord('A')
 PROTO_NAK = ord('N')
 PROTO_READY = ord('R')
 
-# Chunk size - must fit in Arduino's 64-byte hardware serial buffer
+# Chunk size - must be less than Arduino's 64-byte hardware serial buffer
 CHUNK_SIZE = 48
 
 # Default baud rates

@@ -122,8 +122,8 @@ void setup() {
 // =============================================================================
 
 bool receiveChunk() {
-  // Must have at least header byte available
-  if (!Serial.available()) return false;
+  // Need at least 2 bytes to read header and length
+  if (Serial.available() < 2) return false;
 
   uint8_t header = Serial.read();
 
@@ -134,13 +134,7 @@ bool receiveChunk() {
   }
 
   if (header != PROTO_CHUNK) {
-    return false;  // Not a chunk, ignore
-  }
-
-  // Wait for length byte (short timeout)
-  unsigned long startWait = millis();
-  while (!Serial.available()) {
-    if (millis() - startWait > 10) return false;
+    return false;
   }
 
   uint8_t length = Serial.read();
@@ -149,29 +143,23 @@ bool receiveChunk() {
     return false;
   }
 
-  // Read data bytes and compute checksum
+  // Need length + 1 more bytes (data + checksum)
+  // Wait briefly if not all arrived yet
+  uint8_t needed = length + 1;
+  unsigned long startWait = millis();
+  while (Serial.available() < needed) {
+    if (millis() - startWait > 5) {
+      return false;  // Timeout, try again later
+    }
+  }
+
+  // Read all data at once (no blocking now)
   uint8_t checksum = length;
   uint8_t tempBuf[128];
 
   for (uint8_t i = 0; i < length; i++) {
-    startWait = millis();
-    while (!Serial.available()) {
-      if (millis() - startWait > 10) {
-        Serial.write(PROTO_NAK);
-        return false;
-      }
-    }
     tempBuf[i] = Serial.read();
     checksum ^= tempBuf[i];
-  }
-
-  // Read checksum byte
-  startWait = millis();
-  while (!Serial.available()) {
-    if (millis() - startWait > 10) {
-      Serial.write(PROTO_NAK);
-      return false;
-    }
   }
 
   uint8_t receivedChecksum = Serial.read();
