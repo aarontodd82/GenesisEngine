@@ -1,0 +1,49 @@
+# =============================================================================
+# GenesisEngine Library - Syntax Highlighting
+# =============================================================================
+
+# Classes (KEYWORD1)
+GenesisEngine	KEYWORD1
+GenesisBoard	KEYWORD1
+VGMParser	KEYWORD1
+VGMSource	KEYWORD1
+ProgmemSource	KEYWORD1
+
+# Methods (KEYWORD2)
+begin	KEYWORD2
+reset	KEYWORD2
+play	KEYWORD2
+playFile	KEYWORD2
+stop	KEYWORD2
+pause	KEYWORD2
+resume	KEYWORD2
+update	KEYWORD2
+isPlaying	KEYWORD2
+isPaused	KEYWORD2
+isStopped	KEYWORD2
+isFinished	KEYWORD2
+setLooping	KEYWORD2
+isLooping	KEYWORD2
+getState	KEYWORD2
+getTotalSamples	KEYWORD2
+getCurrentSample	KEYWORD2
+getDurationSeconds	KEYWORD2
+getPositionSeconds	KEYWORD2
+hasYM2612	KEYWORD2
+hasSN76489	KEYWORD2
+hasLoop	KEYWORD2
+writeYM2612	KEYWORD2
+writePSG	KEYWORD2
+writeDAC	KEYWORD2
+setDACEnabled	KEYWORD2
+beginDACStream	KEYWORD2
+endDACStream	KEYWORD2
+silencePSG	KEYWORD2
+muteAll	KEYWORD2
+
+# Constants (LITERAL1)
+GenesisEngineState	LITERAL1
+STOPPED	LITERAL1
+PLAYING	LITERAL1
+PAUSED	LITERAL1
+FINISHED	LITERAL1
