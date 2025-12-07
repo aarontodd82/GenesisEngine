@@ -111,14 +111,6 @@ void setup() {
 
   board.begin();
 
-  Serial.println(F("FM-90s Genesis Engine - Serial Streaming"));
-  Serial.print(F("Baud: "));
-  Serial.println(SERIAL_BAUD);
-  Serial.print(F("Buffer: "));
-  Serial.print(BUFFER_SIZE);
-  Serial.println(F(" bytes"));
-  Serial.println(F("Protocol: Checksummed chunks"));
-  Serial.println(F("Ready."));
 
   // Signal ready for first chunk
   Serial.write(PROTO_READY);
@@ -201,11 +193,14 @@ bool receiveChunk() {
     return false;
   }
 
-  // Checksum OK - copy to ring buffer
+  // Checksum OK - but only ACK if we have room for the whole chunk
+  if (bufferFree() < length) {
+    Serial.write(PROTO_NAK);
+    return false;
+  }
+
   for (uint8_t i = 0; i < length; i++) {
-    if (bufferFree() > 0) {
-      bufferWrite(tempBuf[i]);
-    }
+    bufferWrite(tempBuf[i]);
   }
 
   chunksReceived++;
@@ -269,15 +264,11 @@ int32_t processCommand() {
     case 0x61: {
       uint8_t lo = bufferRead();
       uint8_t hi = bufferRead();
-      uint16_t samples = lo | (hi << 8);
-      uint32_t waitUs = ((uint32_t)samples * 10000UL) / 441UL;
-      delay(waitUs / 1000);
-      delayMicroseconds(waitUs % 1000);
-      return 0;
+      return lo | (hi << 8);
     }
 
-    case 0x62: delay(16); return 0;  // 735 samples = ~16.7ms
-    case 0x63: delay(20); return 0;  // 882 samples = ~20ms
+    case 0x62: return 735;
+    case 0x63: return 882;
 
     case 0x66:
       streamEnded = true;
@@ -287,11 +278,8 @@ int32_t processCommand() {
     case 0x70: case 0x71: case 0x72: case 0x73:
     case 0x74: case 0x75: case 0x76: case 0x77:
     case 0x78: case 0x79: case 0x7A: case 0x7B:
-    case 0x7C: case 0x7D: case 0x7E: case 0x7F: {
-      uint8_t samples = (cmd & 0x0F) + 1;
-      delayMicroseconds(samples * 23);  // ~22.7us per sample
-      return 0;
-    }
+    case 0x7C: case 0x7D: case 0x7E: case 0x7F:
+      return (cmd & 0x0F) + 1;
 
     case 0x80: case 0x81: case 0x82: case 0x83:
     case 0x84: case 0x85: case 0x86: case 0x87:
@@ -314,44 +302,30 @@ int32_t processCommand() {
 }
 
 // =============================================================================
-// Playback - simple timing: don't execute until nextCommandTime
+// Playback - simple scheduler
 // =============================================================================
 
-uint32_t nextCommandTime = 0;   // micros() when we can run the next command
-
-uint32_t pendingWaitUs = 0;  // Pending wait time in microseconds
+uint32_t nextCommandTime = 0;  // micros() when next command can run
 
 void updatePlayback() {
-  // Handle pending wait
-  if (pendingWaitUs > 0) {
-    if (pendingWaitUs >= 1000) {
-      delay(pendingWaitUs / 1000);
-      pendingWaitUs = pendingWaitUs % 1000;
-    }
-    if (pendingWaitUs > 0) {
-      delayMicroseconds(pendingWaitUs);
-      pendingWaitUs = 0;
-    }
+  // Not time yet? Do nothing.
+  if ((int32_t)(micros() - nextCommandTime) < 0) {
+    return;
   }
 
-  // Process commands until we hit a wait or run out of data
-  while (state == PLAYING) {
-    int32_t result = processCommand();
+  // Time to run. Process ONE command.
+  int32_t result = processCommand();
 
-    if (result == -2) {
-      // Need more data - DON'T spin, wait a bit
-      delay(1);
-      return;
-    }
-    if (result == -1) return;  // End of stream
+  if (result == -2) return;  // Need more data
+  if (result == -1) return;  // End of stream
 
-    if (result > 0) {
-      // Wait command - store it and return so we can receive more data
-      pendingWaitUs = ((uint32_t)result * 10000UL) / 441UL;
-      return;
-    }
-    // result == 0: chip write, continue processing
+  if (result > 0) {
+    // Wait command: schedule next command from NOW (fresh read)
+    // micros = samples * 1000000 / 44100 = samples * 10000 / 441
+    uint32_t waitUs = ((uint32_t)result * 10000UL) / 441UL;
+    nextCommandTime = micros() + waitUs;
   }
+  // result == 0: chip write, next command can run immediately
 }
 
 // =============================================================================
@@ -368,7 +342,7 @@ void loop() {
           // If we have enough data buffered, start playing
           if (bufferAvailable() >= 128 && !streamEnded) {
             state = PLAYING;
-            nextCommandTime = micros();  // Start now
+            nextCommandTime = micros();
           }
         }
       }
@@ -398,10 +372,6 @@ void loop() {
 
     case STOPPED:
       board.muteAll();
-      Serial.print(F("Done. Chunks: "));
-      Serial.print(chunksReceived);
-      Serial.print(F(", Corrupted: "));
-      Serial.println(chunksCorrupted);
 
       // Reset for next song
       bufferHead = bufferTail = 0;

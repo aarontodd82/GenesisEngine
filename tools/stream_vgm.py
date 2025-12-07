@@ -307,11 +307,10 @@ def stream_vgm(port, baud, vgm_path, verbose=False):
                         break
                     elif response == PROTO_NAK:
                         retransmits += 1
-                        if verbose:
-                            print(f"\n  NAK, retransmitting...")
+                        time.sleep(0.02)  # Wait for buffer to drain before retry
                         ser.write(packet)
                         ack_timeout = time.time()
-                    # Ignore READY - we just care about ACK
+                    # Ignore other bytes (READY, debug text, etc)
                 elif time.time() - ack_timeout > 2:
                     retransmits += 1
                     if verbose:

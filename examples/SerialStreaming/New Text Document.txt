@@ -1,0 +1,104 @@
+your Arduino is silently dropping bytes when its ring buffer gets close to full, which eventually destroys the timing (you lose a bunch of wait commands), so the rest of the song gets blasted out as fast as the CPU can run.
+
+The Python side looks fine; the bug is in the .ino.
+
+Where the bug is
+
+In SerialStreaming.ino you have this code in receiveChunk():
+
+// Checksum OK - copy to ring buffer
+for (uint8_t i = 0; i < length; i++) {
+  if (bufferFree() > 0) {
+    bufferWrite(tempBuf[i]);
+  }
+}
+
+chunksReceived++;
+Serial.write(PROTO_ACK);
+return true;
+
+
+This will:
+
+Read length bytes from serial into tempBuf.
+
+If the ring buffer has space, write them.
+
+If the ring buffer is full, it quietly drops the remaining bytes…
+
+…and then still sends ACK to the PC.
+
+So if bufferFree() is, say, 20 and length is 48, you keep 20 bytes and drop 28, but the Python script thinks the whole chunk made it.
+
+Once that happens, your VGM stream is misaligned: bytes that used to be wait commands (0x61, 0x62, 0x63, 0x70–0x7F) become register writes or junk, so processCommand() sees far fewer waits and a ton of chip writes with result == 0.
+
+Since your playback loop only delays on waits and runs writes as fast as possible, the rest of the file “goes super fast”.
+
+That matches exactly: it sounds fine until the first time the buffer fills enough to start dropping bytes, then timing explodes.
+
+Why this can happen with your current protocol
+
+On the Python side (stream_vgm.py) you:
+
+Just loop and send chunk after chunk, waiting only for ACK/NAK.
+
+You do not use PROTO_READY for flow control during streaming; it’s only used at startup. 
+
+stream_vgm
+
+On the Arduino side, you do have a ring buffer, but:
+
+You never reject a chunk because it won’t fit.
+
+You never block and wait for playback to drain before copying the chunk.
+
+You always ACK even if large parts of the chunk were dropped.
+
+So under any realistic load, eventually the producer (PC) outruns the consumer (player), the ring buffer gets nearly full, and you start losing bytes in receiveChunk().
+
+How to fix it
+1. Don’t ACK if you can’t store the whole chunk
+
+Change the copy section to ensure space for the entire chunk before ACKing:
+
+// Checksum OK - copy to ring buffer
+
+// If there isn't enough room for the whole chunk, NAK it
+if (bufferFree() < length) {
+  Serial.write(PROTO_NAK);
+  return false;
+}
+
+for (uint8_t i = 0; i < length; i++) {
+  bufferWrite(tempBuf[i]);
+}
+
+chunksReceived++;
+Serial.write(PROTO_ACK);
+return true;
+
+
+That way:
+
+Either a whole chunk is written, or none of it is.
+
+The Python script will see a NAK and resend the same data later, after some playback has freed buffer space.
+
+This alone should stop the mid-file speedup, because you will no longer corrupt the VGM stream.
+
+If you want to be fancy, you can also wait a bit for space to free before giving up:
+
+// Try to wait up to ~100 ms for space
+unsigned long startWaitBuf = millis();
+while (bufferFree() < length && millis() - startWaitBuf < 100) {
+  // let playback run; loop() will continue calling updatePlayback()
+}
+
+// If still not enough room, NAK
+if (bufferFree() < length) {
+  Serial.write(PROTO_NAK);
+  return false;
+}
+
+
+Then copy and ACK as above.
