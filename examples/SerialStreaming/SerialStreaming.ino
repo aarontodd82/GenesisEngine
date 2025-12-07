@@ -15,7 +15,7 @@
 
 // Serial baud rate - 115200 is most reliable
 // Higher rates often have corruption issues on AVR boards
-#define SERIAL_BAUD 115200
+#define SERIAL_BAUD 500000
 
 // Ring buffer size
 #if defined(__AVR_ATmega328P__)
@@ -122,13 +122,8 @@ void setup() {
 // =============================================================================
 
 bool receiveChunk() {
-  // Wait for chunk header (with timeout)
-  unsigned long startWait = millis();
-  while (!Serial.available()) {
-    if (millis() - startWait > 1000) {
-      return false;  // Timeout
-    }
-  }
+  // Must have at least header byte available
+  if (!Serial.available()) return false;
 
   uint8_t header = Serial.read();
 
@@ -139,18 +134,13 @@ bool receiveChunk() {
   }
 
   if (header != PROTO_CHUNK) {
-    // Not a chunk - might be garbage, NAK it
-    Serial.write(PROTO_NAK);
-    return false;
+    return false;  // Not a chunk, ignore
   }
 
-  // Wait for length byte
-  startWait = millis();
+  // Wait for length byte (short timeout)
+  unsigned long startWait = millis();
   while (!Serial.available()) {
-    if (millis() - startWait > 100) {
-      Serial.write(PROTO_NAK);
-      return false;
-    }
+    if (millis() - startWait > 10) return false;
   }
 
   uint8_t length = Serial.read();
@@ -160,13 +150,13 @@ bool receiveChunk() {
   }
 
   // Read data bytes and compute checksum
-  uint8_t checksum = length;  // Include length in checksum
+  uint8_t checksum = length;
   uint8_t tempBuf[128];
 
   for (uint8_t i = 0; i < length; i++) {
     startWait = millis();
     while (!Serial.available()) {
-      if (millis() - startWait > 100) {
+      if (millis() - startWait > 10) {
         Serial.write(PROTO_NAK);
         return false;
       }
@@ -178,7 +168,7 @@ bool receiveChunk() {
   // Read checksum byte
   startWait = millis();
   while (!Serial.available()) {
-    if (millis() - startWait > 100) {
+    if (millis() - startWait > 10) {
       Serial.write(PROTO_NAK);
       return false;
     }
@@ -205,6 +195,12 @@ bool receiveChunk() {
 
   chunksReceived++;
   Serial.write(PROTO_ACK);
+
+  // Immediately signal if we have room for another chunk
+  if (bufferFree() >= 64) {
+    Serial.write(PROTO_READY);
+  }
+
   return true;
 }
 
@@ -357,7 +353,7 @@ void loop() {
       // Process playback first (timing critical)
       updatePlayback();
 
-      // Then try to receive more data (don't touch timing!)
+      // Try to receive data (non-blocking - receiveChunk has short timeouts)
       if (Serial.available()) {
         waitingForChunk = false;
         receiveChunk();

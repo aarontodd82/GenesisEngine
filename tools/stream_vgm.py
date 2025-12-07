@@ -41,7 +41,7 @@ BAUD_RATES = {
     'mega': 250000,
     'teensy': 500000,
 }
-DEFAULT_BAUD = 250000
+DEFAULT_BAUD = 500000
 
 
 def find_arduino_port():
@@ -277,6 +277,14 @@ def stream_vgm(port, baud, vgm_path, verbose=False):
     start_time = time.time()
 
     try:
+        # Wait for initial READY
+        while True:
+            if ser.in_waiting:
+                if ser.read(1)[0] == PROTO_READY:
+                    break
+            if time.time() - start_time > 5:
+                break
+
         while pos < total:
             # Send chunk
             chunk_end = min(pos + CHUNK_SIZE, total)
@@ -285,19 +293,9 @@ def stream_vgm(port, baud, vgm_path, verbose=False):
             checksum = compute_checksum(length, chunk_data)
 
             packet = bytes([PROTO_CHUNK, length]) + chunk_data + bytes([checksum])
+            ser.write(packet)
 
-            # Write with retry on timeout
-            for attempt in range(3):
-                try:
-                    ser.write(packet)
-                    break
-                except serial.SerialTimeoutException:
-                    if attempt == 2:
-                        raise
-                    time.sleep(0.05)  # Wait for buffer to drain
-
-            # Wait for ACK
-            ack_timeout = time.time()
+            # Wait for ACK/NAK
             while True:
                 if ser.in_waiting:
                     response = ser.read(1)[0]
@@ -307,16 +305,11 @@ def stream_vgm(port, baud, vgm_path, verbose=False):
                         break
                     elif response == PROTO_NAK:
                         retransmits += 1
-                        time.sleep(0.02)  # Wait for buffer to drain before retry
+                        # Buffer full - wait for READY then resend
+                        while not ser.in_waiting or ser.read(1)[0] != PROTO_READY:
+                            pass
                         ser.write(packet)
-                        ack_timeout = time.time()
-                    # Ignore other bytes (READY, debug text, etc)
-                elif time.time() - ack_timeout > 2:
-                    retransmits += 1
-                    if verbose:
-                        print(f"\n  Timeout, retransmitting...")
-                    ser.write(packet)
-                    ack_timeout = time.time()
+                    # Ignore READY during normal flow
 
             # Progress
             elapsed = time.time() - start_time
