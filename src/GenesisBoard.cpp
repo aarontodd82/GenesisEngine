@@ -94,18 +94,59 @@ void GenesisBoard::writeYM2612(uint8_t port, uint8_t reg, uint8_t val) {
 
   waitIfNeeded(YM_BUSY_US);
 
+#if defined(PLATFORM_AVR)
   // Set port select (A1)
-  digitalWrite(pinA1_Y_, port ? HIGH : LOW);
+  if (port) *portA1_Y_ |= maskA1_Y_; else *portA1_Y_ &= ~maskA1_Y_;
 
-  // --- Address Phase ---
-  digitalWrite(pinA0_Y_, LOW);  // A0 low = address mode
+  // Address phase: A0 low
+  *portA0_Y_ &= ~maskA0_Y_;
+  shiftOut8(reg);
+  // Pulse WR low
+  *portWR_Y_ &= ~maskWR_Y_;
+  *portWR_Y_ |= maskWR_Y_;
+
+  // Data phase: A0 high
+  *portA0_Y_ |= maskA0_Y_;
+  shiftOut8(val);
+  // Pulse WR low
+  *portWR_Y_ &= ~maskWR_Y_;
+  *portWR_Y_ |= maskWR_Y_;
+
+#elif defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3)
+  if (port) *portSetA1_Y_ = maskA1_Y_; else *portClearA1_Y_ = maskA1_Y_;
+
+  *portClearA0_Y_ = maskA0_Y_;
+  shiftOut8(reg);
+  *portClearWR_Y_ = maskWR_Y_;
+  *portSetWR_Y_ = maskWR_Y_;
+
+  *portSetA0_Y_ = maskA0_Y_;
+  shiftOut8(val);
+  *portClearWR_Y_ = maskWR_Y_;
+  *portSetWR_Y_ = maskWR_Y_;
+
+#elif defined(PLATFORM_ESP32)
+  if (port) GPIO.out_w1ts = (1 << pinA1_Y_cached_); else GPIO.out_w1tc = (1 << pinA1_Y_cached_);
+
+  GPIO.out_w1tc = (1 << pinA0_Y_cached_);
+  shiftOut8(reg);
+  GPIO.out_w1tc = (1 << pinWR_Y_cached_);
+  GPIO.out_w1ts = (1 << pinWR_Y_cached_);
+
+  GPIO.out_w1ts = (1 << pinA0_Y_cached_);
+  shiftOut8(val);
+  GPIO.out_w1tc = (1 << pinWR_Y_cached_);
+  GPIO.out_w1ts = (1 << pinWR_Y_cached_);
+
+#else
+  digitalWrite(pinA1_Y_, port ? HIGH : LOW);
+  digitalWrite(pinA0_Y_, LOW);
   shiftOut8(reg);
   pulseLow(pinWR_Y_);
-
-  // --- Data Phase ---
-  digitalWrite(pinA0_Y_, HIGH);  // A0 high = data mode
+  digitalWrite(pinA0_Y_, HIGH);
   shiftOut8(val);
   pulseLow(pinWR_Y_);
+#endif
 
   lastWriteTime_ = micros();
 }
@@ -119,14 +160,37 @@ void GenesisBoard::beginDACStream() {
 
   waitIfNeeded(YM_BUSY_US);
 
-  // Latch the DAC data register address (0x2A)
-  digitalWrite(pinA1_Y_, LOW);   // Port 0
-  digitalWrite(pinA0_Y_, LOW);   // Address mode
+#if defined(PLATFORM_AVR)
+  *portA1_Y_ &= ~maskA1_Y_;  // Port 0
+  *portA0_Y_ &= ~maskA0_Y_;  // Address mode
+  shiftOut8(YM2612_DAC_DATA);
+  *portWR_Y_ &= ~maskWR_Y_;
+  *portWR_Y_ |= maskWR_Y_;
+  *portA0_Y_ |= maskA0_Y_;   // Data mode
+
+#elif defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3)
+  *portClearA1_Y_ = maskA1_Y_;
+  *portClearA0_Y_ = maskA0_Y_;
+  shiftOut8(YM2612_DAC_DATA);
+  *portClearWR_Y_ = maskWR_Y_;
+  *portSetWR_Y_ = maskWR_Y_;
+  *portSetA0_Y_ = maskA0_Y_;
+
+#elif defined(PLATFORM_ESP32)
+  GPIO.out_w1tc = (1 << pinA1_Y_cached_);
+  GPIO.out_w1tc = (1 << pinA0_Y_cached_);
+  shiftOut8(YM2612_DAC_DATA);
+  GPIO.out_w1tc = (1 << pinWR_Y_cached_);
+  GPIO.out_w1ts = (1 << pinWR_Y_cached_);
+  GPIO.out_w1ts = (1 << pinA0_Y_cached_);
+
+#else
+  digitalWrite(pinA1_Y_, LOW);
+  digitalWrite(pinA0_Y_, LOW);
   shiftOut8(YM2612_DAC_DATA);
   pulseLow(pinWR_Y_);
-
-  // Switch to data mode and stay there
   digitalWrite(pinA0_Y_, HIGH);
+#endif
 
   dacStreamMode_ = true;
   lastWriteTime_ = micros();
@@ -135,8 +199,15 @@ void GenesisBoard::beginDACStream() {
 void GenesisBoard::endDACStream() {
   if (!dacStreamMode_) return;
 
-  // Return to address mode
+#if defined(PLATFORM_AVR)
+  *portA0_Y_ &= ~maskA0_Y_;
+#elif defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3)
+  *portClearA0_Y_ = maskA0_Y_;
+#elif defined(PLATFORM_ESP32)
+  GPIO.out_w1tc = (1 << pinA0_Y_cached_);
+#else
   digitalWrite(pinA0_Y_, LOW);
+#endif
   dacStreamMode_ = false;
 }
 
@@ -149,9 +220,20 @@ void GenesisBoard::writeDAC(uint8_t sample) {
   waitIfNeeded(YM_BUSY_US);
 
   // In streaming mode, just shift out data and pulse WR
-  // Address is already latched to 0x2A
   shiftOut8(sample);
+
+#if defined(PLATFORM_AVR)
+  *portWR_Y_ &= ~maskWR_Y_;
+  *portWR_Y_ |= maskWR_Y_;
+#elif defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3)
+  *portClearWR_Y_ = maskWR_Y_;
+  *portSetWR_Y_ = maskWR_Y_;
+#elif defined(PLATFORM_ESP32)
+  GPIO.out_w1tc = (1 << pinWR_Y_cached_);
+  GPIO.out_w1ts = (1 << pinWR_Y_cached_);
+#else
   pulseLow(pinWR_Y_);
+#endif
 
   lastWriteTime_ = micros();
 }
@@ -172,9 +254,24 @@ void GenesisBoard::writePSG(uint8_t val) {
   shiftOut8(reverseBits(val));
 
   // PSG write strobe - needs longer pulse than YM2612
+  // Original: 8µs minimum pulse width
+#if defined(PLATFORM_AVR)
+  *portWR_P_ &= ~maskWR_P_;
+  delayMicroseconds(8);  // PSG needs full pulse width
+  *portWR_P_ |= maskWR_P_;
+#elif defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3)
+  *portClearWR_P_ = maskWR_P_;
+  delayMicroseconds(8);  // Teensy is fast, needs real delay
+  *portSetWR_P_ = maskWR_P_;
+#elif defined(PLATFORM_ESP32)
+  GPIO.out_w1tc = (1 << pinWR_P_cached_);
+  delayMicroseconds(4);  // ESP32 needs some delay
+  GPIO.out_w1ts = (1 << pinWR_P_cached_);
+#else
   digitalWrite(pinWR_P_, LOW);
-  delayMicroseconds(8);  // Minimum 8μs pulse width
+  delayMicroseconds(8);
   digitalWrite(pinWR_P_, HIGH);
+#endif
 
   lastWriteTime_ = micros();
 }
@@ -219,31 +316,46 @@ void GenesisBoard::initFastGPIO() {
   // Cache port addresses and bitmasks for AVR
   portSCK_ = portOutputRegister(digitalPinToPort(pinSCK_));
   portSDI_ = portOutputRegister(digitalPinToPort(pinSDI_));
+  portWR_Y_ = portOutputRegister(digitalPinToPort(pinWR_Y_));
+  portWR_P_ = portOutputRegister(digitalPinToPort(pinWR_P_));
+  portA0_Y_ = portOutputRegister(digitalPinToPort(pinA0_Y_));
+  portA1_Y_ = portOutputRegister(digitalPinToPort(pinA1_Y_));
   maskSCK_ = digitalPinToBitMask(pinSCK_);
   maskSDI_ = digitalPinToBitMask(pinSDI_);
+  maskWR_Y_ = digitalPinToBitMask(pinWR_Y_);
+  maskWR_P_ = digitalPinToBitMask(pinWR_P_);
+  maskA0_Y_ = digitalPinToBitMask(pinA0_Y_);
+  maskA1_Y_ = digitalPinToBitMask(pinA1_Y_);
 
-#elif defined(PLATFORM_TEENSY4)
-  // Teensy 4.x uses GPIO6/7/8/9 fast registers
+#elif defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3)
+  // Teensy: cache set/clear registers
   maskSCK_ = digitalPinToBitMask(pinSCK_);
   maskSDI_ = digitalPinToBitMask(pinSDI_);
+  maskWR_Y_ = digitalPinToBitMask(pinWR_Y_);
+  maskWR_P_ = digitalPinToBitMask(pinWR_P_);
+  maskA0_Y_ = digitalPinToBitMask(pinA0_Y_);
+  maskA1_Y_ = digitalPinToBitMask(pinA1_Y_);
   portSetSCK_ = portSetRegister(pinSCK_);
   portClearSCK_ = portClearRegister(pinSCK_);
   portSetSDI_ = portSetRegister(pinSDI_);
   portClearSDI_ = portClearRegister(pinSDI_);
-
-#elif defined(PLATFORM_TEENSY3)
-  // Teensy 3.x
-  maskSCK_ = digitalPinToBitMask(pinSCK_);
-  maskSDI_ = digitalPinToBitMask(pinSDI_);
-  portSetSCK_ = portSetRegister(pinSCK_);
-  portClearSCK_ = portClearRegister(pinSCK_);
-  portSetSDI_ = portSetRegister(pinSDI_);
-  portClearSDI_ = portClearRegister(pinSDI_);
+  portSetWR_Y_ = portSetRegister(pinWR_Y_);
+  portClearWR_Y_ = portClearRegister(pinWR_Y_);
+  portSetWR_P_ = portSetRegister(pinWR_P_);
+  portClearWR_P_ = portClearRegister(pinWR_P_);
+  portSetA0_Y_ = portSetRegister(pinA0_Y_);
+  portClearA0_Y_ = portClearRegister(pinA0_Y_);
+  portSetA1_Y_ = portSetRegister(pinA1_Y_);
+  portClearA1_Y_ = portClearRegister(pinA1_Y_);
 
 #elif defined(PLATFORM_ESP32)
-  // ESP32 - cache pin numbers (GPIO functions are already fast)
+  // ESP32 - cache pin numbers
   pinSCK_cached_ = pinSCK_;
   pinSDI_cached_ = pinSDI_;
+  pinWR_Y_cached_ = pinWR_Y_;
+  pinWR_P_cached_ = pinWR_P_;
+  pinA0_Y_cached_ = pinA0_Y_;
+  pinA1_Y_cached_ = pinA1_Y_;
 
 #endif
   // Other platforms use standard digitalWrite (no caching needed)

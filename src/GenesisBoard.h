@@ -96,25 +96,55 @@ private:
   bool dacStreamMode_;
 
   // Timing constants (microseconds)
+  // Note: Teensy needs these full values, AVR is slow enough it doesn't
+#if defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3)
   static constexpr uint32_t YM_BUSY_US = 5;    // YM2612 busy flag duration
   static constexpr uint32_t PSG_BUSY_US = 9;   // SN76489 write delay
+#else
+  static constexpr uint32_t YM_BUSY_US = 0;    // AVR GPIO is slow enough
+  static constexpr uint32_t PSG_BUSY_US = 0;   // AVR GPIO is slow enough
+#endif
 
   // Fast GPIO - cached port/bitmask for direct port manipulation
 #if defined(PLATFORM_AVR)
   volatile uint8_t* portSCK_;
   volatile uint8_t* portSDI_;
+  volatile uint8_t* portWR_Y_;
+  volatile uint8_t* portWR_P_;
+  volatile uint8_t* portA0_Y_;
+  volatile uint8_t* portA1_Y_;
   uint8_t maskSCK_;
   uint8_t maskSDI_;
+  uint8_t maskWR_Y_;
+  uint8_t maskWR_P_;
+  uint8_t maskA0_Y_;
+  uint8_t maskA1_Y_;
 #elif defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3)
   volatile uint32_t* portSetSCK_;
   volatile uint32_t* portClearSCK_;
   volatile uint32_t* portSetSDI_;
   volatile uint32_t* portClearSDI_;
+  volatile uint32_t* portSetWR_Y_;
+  volatile uint32_t* portClearWR_Y_;
+  volatile uint32_t* portSetWR_P_;
+  volatile uint32_t* portClearWR_P_;
+  volatile uint32_t* portSetA0_Y_;
+  volatile uint32_t* portClearA0_Y_;
+  volatile uint32_t* portSetA1_Y_;
+  volatile uint32_t* portClearA1_Y_;
   uint32_t maskSCK_;
   uint32_t maskSDI_;
+  uint32_t maskWR_Y_;
+  uint32_t maskWR_P_;
+  uint32_t maskA0_Y_;
+  uint32_t maskA1_Y_;
 #elif defined(PLATFORM_ESP32)
   uint8_t pinSCK_cached_;
   uint8_t pinSDI_cached_;
+  uint8_t pinWR_Y_cached_;
+  uint8_t pinWR_P_cached_;
+  uint8_t pinA0_Y_cached_;
+  uint8_t pinA1_Y_cached_;
 #endif
 
   // -------------------------------------------------------------------------

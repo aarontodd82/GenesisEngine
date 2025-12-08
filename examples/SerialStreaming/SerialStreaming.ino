@@ -23,22 +23,26 @@
 #define SERIAL_BAUD 230400
 
 // Ring buffer size - maximize for each board
+// MUST be power of 2 for fast bitmask operations!
 // Uno has 2KB RAM, Mega has 8KB RAM
 #if defined(__AVR_ATmega328P__)
   // Uno: Use most of available RAM for buffer
   #define BUFFER_SIZE 512
+  #define BUFFER_MASK 0x1FF  // BUFFER_SIZE - 1
   #define CHUNK_SIZE 64
   #define BUFFER_FILL_BEFORE_PLAY 384  // 75% full before starting
   #define BOARD_TYPE 1  // Uno
 #elif defined(__AVR_ATmega2560__)
   // Mega: Plenty of RAM
   #define BUFFER_SIZE 2048
+  #define BUFFER_MASK 0x7FF  // BUFFER_SIZE - 1
   #define CHUNK_SIZE 128
   #define BUFFER_FILL_BEFORE_PLAY 1536  // 75% full before starting
   #define BOARD_TYPE 2  // Mega
 #else
   // Other boards (Teensy, etc)
   #define BUFFER_SIZE 4096
+  #define BUFFER_MASK 0xFFF  // BUFFER_SIZE - 1
   #define CHUNK_SIZE 128
   #define BUFFER_FILL_BEFORE_PLAY 3072
   #define BOARD_TYPE 3  // Other
@@ -87,12 +91,12 @@ inline bool bufferEmpty() {
 
 inline void bufferWrite(uint8_t b) {
   buffer[bufferHead] = b;
-  bufferHead = (bufferHead + 1) % BUFFER_SIZE;
+  bufferHead = (bufferHead + 1) & BUFFER_MASK;  // Fast modulo for power-of-2
 }
 
 inline uint8_t bufferRead() {
   uint8_t b = buffer[bufferTail];
-  bufferTail = (bufferTail + 1) % BUFFER_SIZE;
+  bufferTail = (bufferTail + 1) & BUFFER_MASK;  // Fast modulo for power-of-2
   return b;
 }
 
@@ -101,7 +105,7 @@ inline uint8_t bufferPeek() {
 }
 
 inline uint8_t bufferPeekAt(uint16_t offset) {
-  return buffer[(bufferTail + offset) % BUFFER_SIZE];
+  return buffer[(bufferTail + offset) & BUFFER_MASK];  // Fast modulo
 }
 
 // =============================================================================
@@ -428,33 +432,44 @@ int32_t processCommand() {
 // =============================================================================
 
 void updatePlayback() {
-  // Check if it's time to process the next command
-  uint32_t now = micros();
-  if ((int32_t)(now - nextCommandTime) < 0) {
-    return;  // Not time yet
-  }
+  // Process commands until we hit a wait or run out of data
+  // Interleave receiveData() to prevent serial buffer overflow
+  uint8_t cmdCount = 0;
 
-  // Process one command
-  int32_t result = processCommand();
+  while (true) {
+    // Check if it's time to process the next command
+    uint32_t now = micros();
+    if ((int32_t)(now - nextCommandTime) < 0) {
+      return;  // Not time yet
+    }
 
-  if (result == -2) {
-    // Need more data - will get it on next receiveData() call
-    return;
-  }
+    // Process one command
+    int32_t result = processCommand();
 
-  if (result == -1) {
-    // End of stream
-    return;
-  }
+    if (result == -2) {
+      // Need more data
+      return;
+    }
 
-  if (result > 0) {
-    // Wait command: schedule next command
-    // Convert samples to microseconds: samples * 1000000 / 44100
-    // Optimized: samples * 10000 / 441
-    uint32_t waitUs = ((uint32_t)result * 10000UL) / 441UL;
-    nextCommandTime = now + waitUs;
+    if (result == -1) {
+      // End of stream
+      return;
+    }
+
+    if (result > 0) {
+      // Wait command: schedule next command
+      uint32_t waitUs = ((uint32_t)result * 10000UL) / 441UL;
+      nextCommandTime = now + waitUs;
+      return;  // Exit and let loop() call receiveData()
+    }
+
+    // result == 0: chip write, continue processing
+    // But check serial every few commands to prevent overflow
+    if (++cmdCount >= 4) {
+      receiveData();
+      cmdCount = 0;
+    }
   }
-  // result == 0: chip write, continue immediately (don't update nextCommandTime)
 }
 
 // =============================================================================
