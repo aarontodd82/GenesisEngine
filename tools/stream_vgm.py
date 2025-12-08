@@ -72,9 +72,17 @@ FRAME_SAMPLES_PAL = 882
 # =============================================================================
 
 DEFAULT_BAUD = 500000
-CHUNK_SIZE = 48  # Must match Arduino's CHUNK_SIZE
+
+# Chunk sizes per board type (sent during handshake)
+CHUNK_SIZE_UNO = 64
+CHUNK_SIZE_MEGA = 128
+CHUNK_SIZE_DEFAULT = 64  # Conservative default
+
 CHUNK_HEADER = 0x01
 CHUNK_END = 0x02
+
+# Pipelined flow control - send multiple chunks before waiting for ACK
+CHUNKS_IN_FLIGHT = 3
 
 # =============================================================================
 # Utility Functions
@@ -242,62 +250,168 @@ def preprocess_vgm(data, data_offset):
     return commands
 
 
-def apply_rle_compression(commands):
+def apply_wait_optimization(commands):
     """
-    Apply RLE compression to consecutive wait commands.
-    Compresses runs of CMD_WAIT_NTSC (0x62) into CMD_RLE_WAIT_FRAME_1.
+    Optimize wait commands:
+    1. Merge consecutive waits into single CMD_WAIT_FRAMES
+    2. Convert small waits to short wait commands (0x70-0x7F)
+    3. Use RLE for runs of frame waits
     """
-    compressed = []
+    optimized = []
     i = 0
+
+    def get_wait_samples(cmd, args):
+        """Extract wait samples from a command."""
+        if cmd == CMD_WAIT_NTSC:
+            return FRAME_SAMPLES_NTSC
+        elif cmd == CMD_WAIT_PAL:
+            return FRAME_SAMPLES_PAL
+        elif cmd == CMD_WAIT_FRAMES:
+            return struct.unpack('<H', args)[0]
+        elif 0x70 <= cmd <= 0x7F:
+            return (cmd & 0x0F) + 1
+        return 0
+
+    def is_wait_cmd(cmd):
+        return cmd in (CMD_WAIT_NTSC, CMD_WAIT_PAL, CMD_WAIT_FRAMES) or (0x70 <= cmd <= 0x7F)
 
     while i < len(commands):
         cmd, args = commands[i]
 
-        # Look for runs of NTSC frame waits
-        if cmd == CMD_WAIT_NTSC:
-            count = 1
-            while (i + count < len(commands) and
-                   commands[i + count][0] == CMD_WAIT_NTSC and
-                   count < 255):
-                count += 1
+        # Accumulate consecutive waits
+        if is_wait_cmd(cmd):
+            total_samples = get_wait_samples(cmd, args)
+            j = i + 1
 
-            if count >= 2:
-                # Use RLE encoding
-                compressed.append((CMD_RLE_WAIT_FRAME_1, bytes([count])))
-                i += count
+            # Merge consecutive waits
+            while j < len(commands) and is_wait_cmd(commands[j][0]):
+                total_samples += get_wait_samples(commands[j][0], commands[j][1])
+                j += 1
+
+            # Output optimized wait(s)
+            while total_samples > 0:
+                if total_samples >= FRAME_SAMPLES_NTSC * 2 and total_samples % FRAME_SAMPLES_NTSC == 0:
+                    # Multiple NTSC frames - use RLE
+                    frames = total_samples // FRAME_SAMPLES_NTSC
+                    if frames <= 255:
+                        optimized.append((CMD_RLE_WAIT_FRAME_1, bytes([frames])))
+                        total_samples = 0
+                    else:
+                        optimized.append((CMD_RLE_WAIT_FRAME_1, bytes([255])))
+                        total_samples -= 255 * FRAME_SAMPLES_NTSC
+                elif total_samples == FRAME_SAMPLES_NTSC:
+                    optimized.append((CMD_WAIT_NTSC, b''))
+                    total_samples = 0
+                elif total_samples == FRAME_SAMPLES_PAL:
+                    optimized.append((CMD_WAIT_PAL, b''))
+                    total_samples = 0
+                elif total_samples <= 16:
+                    # Short wait 0x70-0x7F (1-16 samples)
+                    optimized.append((0x70 + (total_samples - 1), b''))
+                    total_samples = 0
+                elif total_samples <= 65535:
+                    # General wait
+                    optimized.append((CMD_WAIT_FRAMES, struct.pack('<H', total_samples)))
+                    total_samples = 0
+                else:
+                    # Too large - split
+                    optimized.append((CMD_WAIT_FRAMES, struct.pack('<H', 65535)))
+                    total_samples -= 65535
+
+            i = j
+            continue
+
+        optimized.append((cmd, args))
+        i += 1
+
+    return optimized
+
+
+def strip_dac(commands):
+    """
+    Remove all DAC commands, converting them to waits.
+    Preserves timing by keeping the wait portion of 0x80-0x8F commands.
+    """
+    stripped = []
+
+    for cmd, args in commands:
+        # DAC + wait commands (0x80-0x8F)
+        if 0x80 <= cmd <= 0x8F:
+            # Extract wait portion and convert to short wait
+            wait = cmd & 0x0F
+            if wait > 0:
+                stripped.append((0x70 + wait - 1, b''))  # Short wait (0x70-0x7F)
+            # If wait is 0, just skip the command entirely
+        else:
+            stripped.append((cmd, args))
+
+    return stripped
+
+
+def apply_dac_compression(commands, dac_rate=1, dac_bits=8):
+    """
+    Compress DAC data:
+    - dac_rate: 1 = full rate, 2 = half rate, 4 = quarter rate (skip samples)
+    - dac_bits: 8 = full quality, 6 = reduced, 4 = low quality
+
+    Lower rates and bits = smaller data but lower quality.
+    """
+    if dac_rate == 1 and dac_bits == 8:
+        return commands  # No compression
+
+    compressed = []
+    dac_count = 0
+
+    for cmd, args in commands:
+        # DAC + wait commands (0x80-0x8F)
+        if 0x80 <= cmd <= 0x8F and args:
+            dac_count += 1
+
+            # Rate reduction: skip samples
+            if dac_rate > 1 and (dac_count % dac_rate) != 1:
+                # Skip this sample, but keep the wait
+                wait = cmd & 0x0F
+                if wait > 0:
+                    compressed.append((0x70 + wait - 1, b''))  # Short wait
                 continue
 
-        compressed.append((cmd, args))
-        i += 1
+            # Bit reduction: reduce precision
+            if dac_bits < 8:
+                sample = args[0]
+                shift = 8 - dac_bits
+                sample = (sample >> shift) << shift  # Reduce and restore
+                args = bytes([sample])
+
+            compressed.append((cmd, args))
+        else:
+            compressed.append((cmd, args))
 
     return compressed
 
 
-def apply_dpcm_compression(commands, use_dpcm=True):
+def apply_dpcm_compression(commands):
     """
-    Apply DPCM compression to DAC data (0x80-0x8F commands).
+    Apply DPCM compression to DAC data (0x80 commands with 0 wait).
     Groups consecutive DAC writes and compresses to 4-bit deltas.
+    Achieves ~50% compression on DAC data.
     """
-    if not use_dpcm:
-        return commands
-
     compressed = []
     i = 0
 
     while i < len(commands):
         cmd, args = commands[i]
 
-        # Look for runs of DAC+wait with 0 wait (0x80)
+        # Look for runs of DAC+wait with 0 wait (0x80 only)
         if cmd == 0x80 and args:
             dac_samples = [args[0]]
             j = i + 1
 
-            # Collect consecutive DAC samples
+            # Collect consecutive 0x80 samples (DAC write with no wait)
             while j < len(commands) and commands[j][0] == 0x80 and commands[j][1]:
                 dac_samples.append(commands[j][1][0])
                 j += 1
 
-            # Need at least 4 samples to make DPCM worthwhile (2 packed bytes)
+            # Need at least 4 samples to make DPCM worthwhile
             if len(dac_samples) >= 4:
                 # Encode as DPCM
                 dpcm_data = encode_dpcm(dac_samples)
@@ -353,7 +467,7 @@ def commands_to_bytes(commands):
 # Streaming
 # =============================================================================
 
-def stream_vgm(port, baud, vgm_path, use_rle=True, use_dpcm=False, verbose=False):
+def stream_vgm(port, baud, vgm_path, use_dpcm=False, dac_rate=1, dac_bits=8, no_dac=False, verbose=False):
     """Stream VGM file using binary protocol."""
 
     # Load file
@@ -377,12 +491,21 @@ def stream_vgm(port, baud, vgm_path, use_rle=True, use_dpcm=False, verbose=False
     print("  Preprocessing VGM...")
     commands = preprocess_vgm(data, header['data_offset'])
     original_cmd_count = len(commands)
+    original_bytes = sum(1 + len(args) for cmd, args in commands)
 
-    # Apply compression
-    if use_rle:
-        commands = apply_rle_compression(commands)
-        print(f"  RLE compression: {original_cmd_count} -> {len(commands)} commands")
+    # Apply DAC processing
+    if no_dac:
+        commands = strip_dac(commands)
+        print(f"  DAC stripped (FM/PSG only)")
+    elif dac_rate > 1 or dac_bits < 8:
+        commands = apply_dac_compression(commands, dac_rate, dac_bits)
+        print(f"  DAC compression: rate=1/{dac_rate}, bits={dac_bits}")
 
+    # Apply wait optimization (merges and RLE)
+    commands = apply_wait_optimization(commands)
+    print(f"  Wait optimization: {original_cmd_count} -> {len(commands)} commands")
+
+    # Apply DPCM compression for DAC streams
     if use_dpcm:
         before_dpcm = len(commands)
         commands = apply_dpcm_compression(commands)
@@ -390,7 +513,8 @@ def stream_vgm(port, baud, vgm_path, use_rle=True, use_dpcm=False, verbose=False
 
     # Convert to bytes
     stream_data = commands_to_bytes(commands)
-    print(f"  Stream size: {len(stream_data):,} bytes")
+    compression_ratio = len(stream_data) / original_bytes * 100 if original_bytes > 0 else 100
+    print(f"  Stream size: {len(stream_data):,} bytes ({compression_ratio:.1f}% of original)")
 
     # Connect
     print(f"\nConnecting to {port} at {baud} baud...")
@@ -461,13 +585,17 @@ def stream_vgm(port, baud, vgm_path, use_rle=True, use_dpcm=False, verbose=False
         ser.close()
         return False
 
-    # Stream data with chunked protocol
+    # Stream data with pipelined chunked protocol
+    # Use conservative chunk size (works for both Uno and Mega)
+    # The Arduino will accept any chunk <= its CHUNK_SIZE
     print("\nStreaming...")
     pos = 0
     total = len(stream_data)
     start_time = time.time()
     last_progress = -1
-    retransmits = 0
+    chunks_sent = 0
+    acks_received = 0
+    chunk_size = CHUNK_SIZE_UNO  # Use smaller size for compatibility with all boards
 
     def send_chunk(data):
         """Send a chunk with header, length, data, and checksum."""
@@ -478,34 +606,53 @@ def stream_vgm(port, baud, vgm_path, use_rle=True, use_dpcm=False, verbose=False
         packet = bytes([CHUNK_HEADER, length]) + data + bytes([checksum & 0xFF])
         ser.write(packet)
 
-    def wait_for_ready():
-        """Wait for READY signal from Arduino. Returns False on timeout/NAK."""
-        nonlocal retransmits
-        while True:
-            if ser.in_waiting:
-                b = ser.read(1)[0]
-                if b == FLOW_READY:
-                    return True
-                elif b == FLOW_NAK:
-                    retransmits += 1
-                    return False  # Need to resend
-                elif verbose:
-                    print(f"\n  [0x{b:02X}]", end="")
-            # Brief sleep to avoid busy-waiting
-            time.sleep(0.0001)
+    def check_for_ready():
+        """Check for READY/NAK signals (non-blocking). Returns number of READYs received."""
+        count = 0
+        while ser.in_waiting:
+            b = ser.read(1)[0]
+            if b == FLOW_READY:
+                count += 1
+            elif b == FLOW_NAK:
+                # NAK means Arduino had a problem - count it as a ready to keep flow going
+                # (the chunk was either corrupted or buffer was full, either way move on)
+                count += 1
+                if verbose:
+                    print(f"\n  [NAK]", end="")
+            elif verbose:
+                print(f"\n  [0x{b:02X}]", end="")
+        return count
+
+    def wait_for_ready(timeout=2.0):
+        """Wait for at least one READY signal."""
+        start = time.time()
+        while time.time() - start < timeout:
+            count = check_for_ready()
+            if count > 0:
+                return count
+            time.sleep(0.001)
+        return 0
 
     try:
         while pos < total:
-            # Prepare chunk
-            chunk_end = min(pos + CHUNK_SIZE, total)
-            chunk_data = stream_data[pos:chunk_end]
+            # Send multiple chunks (pipelined)
+            while chunks_sent - acks_received < CHUNKS_IN_FLIGHT and pos < total:
+                chunk_end = min(pos + chunk_size, total)
+                chunk_data = stream_data[pos:chunk_end]
+                send_chunk(chunk_data)
+                pos = chunk_end
+                chunks_sent += 1
 
-            # Send chunk and wait for ACK
-            send_chunk(chunk_data)
+            # Check for ACKs (non-blocking most of the time)
+            acks = check_for_ready()
+            acks_received += acks
 
-            if wait_for_ready():
-                pos = chunk_end  # Move forward on success
-            # On NAK, we'll resend the same chunk next iteration
+            # If we've sent many chunks without ACK, wait for one
+            if chunks_sent - acks_received >= CHUNKS_IN_FLIGHT:
+                acks = wait_for_ready(0.5)
+                acks_received += acks
+                if acks == 0 and verbose:
+                    print(f"\n  [timeout waiting for ACK]", end="")
 
             # Progress display (update every 1%)
             progress = pos * 100 // total
@@ -517,11 +664,12 @@ def stream_vgm(port, baud, vgm_path, use_rle=True, use_dpcm=False, verbose=False
                     bar_width = 30
                     filled = bar_width * pos // total
                     bar = "=" * filled + "-" * (bar_width - filled)
-                    print(f"\r  [{bar}] {progress}% {rate:.1f}KB/s rtx:{retransmits}", end="", flush=True)
+                    inflight = chunks_sent - acks_received
+                    print(f"\r  [{bar}] {progress}% {rate:.1f}KB/s q:{inflight}", end="", flush=True)
 
-        # Send end marker
+        # Send end marker and wait for final ACK
         ser.write(bytes([CHUNK_END]))
-        wait_for_ready()
+        wait_for_ready(1.0)
 
         print(f"\n\nStream complete! Waiting for playback...")
 
@@ -562,8 +710,16 @@ def main():
 Examples:
     python stream_vgm.py song.vgm --port COM3
     python stream_vgm.py song.vgz --port /dev/ttyUSB0 --baud 250000
-    python stream_vgm.py song.vgm --no-rle  # Disable RLE compression
-    python stream_vgm.py song.vgm --dpcm    # Enable DPCM for DAC audio
+    python stream_vgm.py song.vgm --dpcm         # Enable DPCM for DAC audio
+    python stream_vgm.py song.vgm --dac-rate 2   # Half DAC sample rate
+    python stream_vgm.py song.vgm --dac-bits 6   # Reduce DAC to 6-bit
+
+DAC Compression (for songs with PCM/DAC audio):
+    --dac-rate 2   Skip every other DAC sample (halves data)
+    --dac-rate 4   Keep 1 in 4 DAC samples (quarters data)
+    --dac-bits 6   Reduce to 6-bit DAC (slight quality loss)
+    --dac-bits 4   Reduce to 4-bit DAC (noticeable quality loss)
+    --dpcm         DPCM encoding (50% compression, slight quality loss)
         """
     )
 
@@ -573,10 +729,14 @@ Examples:
                         help=f'Baud rate (default: {DEFAULT_BAUD})')
     parser.add_argument('--list-ports', '-l', action='store_true',
                         help='List available serial ports')
-    parser.add_argument('--no-rle', action='store_true',
-                        help='Disable RLE compression')
     parser.add_argument('--dpcm', action='store_true',
                         help='Enable DPCM compression for DAC audio')
+    parser.add_argument('--dac-rate', type=int, default=1, choices=[1, 2, 4],
+                        help='DAC sample rate divisor (1=full, 2=half, 4=quarter)')
+    parser.add_argument('--dac-bits', type=int, default=8, choices=[4, 6, 8],
+                        help='DAC bit depth (8=full, 6=reduced, 4=low)')
+    parser.add_argument('--no-dac', action='store_true',
+                        help='Strip all DAC/PCM data (FM/PSG only, smallest size)')
     parser.add_argument('--verbose', '-v', action='store_true',
                         help='Verbose output')
 
@@ -589,11 +749,12 @@ Examples:
     if not args.file:
         print("Usage: python stream_vgm.py <file.vgm> [options]")
         print("\nOptions:")
-        print("  --port PORT    Serial port")
-        print("  --baud BAUD    Baud rate (default: 250000)")
-        print("  --no-rle       Disable RLE compression")
-        print("  --dpcm         Enable DPCM compression")
-        print("  --list-ports   List available serial ports")
+        print("  --port PORT      Serial port")
+        print("  --baud BAUD      Baud rate (default: 500000)")
+        print("  --dpcm           Enable DPCM compression")
+        print("  --dac-rate N     DAC sample rate divisor (1, 2, or 4)")
+        print("  --dac-bits N     DAC bit depth (4, 6, or 8)")
+        print("  --list-ports     List available serial ports")
         return 1
 
     if not os.path.exists(args.file):
@@ -610,8 +771,10 @@ Examples:
         port,
         args.baud,
         args.file,
-        use_rle=not args.no_rle,
         use_dpcm=args.dpcm,
+        dac_rate=args.dac_rate,
+        dac_bits=args.dac_bits,
+        no_dac=args.no_dac,
         verbose=args.verbose
     )
     return 0 if success else 1

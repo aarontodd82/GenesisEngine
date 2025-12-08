@@ -17,24 +17,39 @@
 #include "StreamingProtocol.h"
 
 // =============================================================================
-// Configuration
+// Configuration - Auto-detect board capabilities
 // =============================================================================
 
 #define SERIAL_BAUD 500000
 
-// Ring buffer size (bytes)
+// Ring buffer size - maximize for each board
+// Uno has 2KB RAM, Mega has 8KB RAM
 #if defined(__AVR_ATmega328P__)
-  #define BUFFER_SIZE 256
-#elif defined(__AVR_ATmega2560__)
+  // Uno: Use most of available RAM for buffer
   #define BUFFER_SIZE 512
+  #define CHUNK_SIZE 64
+  #define BUFFER_FILL_BEFORE_PLAY 384  // 75% full before starting
+  #define BOARD_TYPE 1  // Uno
+#elif defined(__AVR_ATmega2560__)
+  // Mega: Plenty of RAM
+  #define BUFFER_SIZE 2048
+  #define CHUNK_SIZE 128
+  #define BUFFER_FILL_BEFORE_PLAY 1536  // 75% full before starting
+  #define BOARD_TYPE 2  // Mega
 #else
-  #define BUFFER_SIZE 1024
+  // Other boards (Teensy, etc)
+  #define BUFFER_SIZE 4096
+  #define CHUNK_SIZE 128
+  #define BUFFER_FILL_BEFORE_PLAY 3072
+  #define BOARD_TYPE 3  // Other
 #endif
 
 // Chunk protocol
 #define CHUNK_HEADER 0x01
 #define CHUNK_END    0x02
-#define CHUNK_SIZE   48  // Max bytes per chunk
+
+// Flow control - how many chunks can be "in flight" before needing ACK
+#define CHUNKS_IN_FLIGHT 3
 
 // =============================================================================
 // Pin Configuration
@@ -125,88 +140,97 @@ void setup() {
 }
 
 // =============================================================================
-// Serial Data Reception
+// Serial Data Reception - Fully Non-blocking
 // =============================================================================
 
-// Try to receive a chunk. Non-blocking - returns immediately if no complete chunk available.
-// Returns: true if chunk received, false otherwise
-bool receiveChunk() {
-  if (Serial.available() < 2) return false;
+// Receive state machine
+enum RxState { RX_IDLE, RX_HAVE_HEADER, RX_HAVE_LENGTH, RX_READING_DATA };
+RxState rxState = RX_IDLE;
+uint8_t rxLength = 0;
+uint8_t rxCount = 0;
+uint8_t rxChecksum = 0;
+uint8_t rxTempBuf[CHUNK_SIZE];
+uint8_t chunksReceived = 0;  // Count chunks for pipelined ACK
 
-  uint8_t header = Serial.peek();
+// Process incoming serial data - completely non-blocking
+// Call this frequently from loop()
+void receiveData() {
+  while (Serial.available() > 0) {
+    uint8_t b = Serial.read();
 
-  // Handle PING during WAITING state
-  if (header == CMD_PING && state == WAITING) {
-    Serial.read();  // consume it
-    Serial.write(CMD_ACK);
-    return false;
-  }
+    switch (rxState) {
+      case RX_IDLE:
+        // Handle PING during WAITING state
+        if (b == CMD_PING && state == WAITING) {
+          Serial.write(CMD_ACK);
+          break;
+        }
 
-  // End of stream marker
-  if (header == CHUNK_END) {
-    Serial.read();  // consume it
-    streamEnded = true;
-    Serial.write(FLOW_READY);  // ACK the end
-    return true;
-  }
+        // End of stream marker
+        if (b == CHUNK_END) {
+          streamEnded = true;
+          Serial.write(FLOW_READY);
+          break;
+        }
 
-  // Must be chunk header
-  if (header != CHUNK_HEADER) {
-    Serial.read();  // consume bad byte
-    return false;
-  }
+        // Chunk header
+        if (b == CHUNK_HEADER) {
+          rxState = RX_HAVE_HEADER;
+        }
+        break;
 
-  // Peek at length (don't consume header yet)
-  Serial.read();  // consume header
-  uint8_t length = Serial.read();
+      case RX_HAVE_HEADER:
+        // This byte is the length
+        if (b == 0 || b > CHUNK_SIZE) {
+          rxState = RX_IDLE;
+          break;
+        }
+        rxLength = b;
+        rxCount = 0;
+        rxChecksum = b;  // Start checksum with length
+        rxState = RX_HAVE_LENGTH;
+        break;
 
-  if (length == 0 || length > CHUNK_SIZE) {
-    Serial.write(FLOW_NAK);
-    return false;
-  }
+      case RX_HAVE_LENGTH:
+        // Reading data bytes
+        rxTempBuf[rxCount++] = b;
+        rxChecksum ^= b;
 
-  // Wait for complete chunk (data + checksum)
-  uint8_t needed = length + 1;
-  unsigned long startWait = millis();
-  while (Serial.available() < needed) {
-    if (millis() - startWait > 10) {
-      return false;  // Timeout - will retry next loop
+        if (rxCount >= rxLength) {
+          rxState = RX_READING_DATA;  // Next byte is checksum
+        }
+        break;
+
+      case RX_READING_DATA:
+        // This byte is the checksum
+        if (b == rxChecksum && bufferFree() >= rxLength) {
+          // Valid chunk - copy to ring buffer
+          for (uint8_t i = 0; i < rxLength; i++) {
+            bufferWrite(rxTempBuf[i]);
+          }
+          chunksReceived++;
+
+          // Always send READY immediately during WAITING (need to fill buffer fast)
+          // During PLAYING, use pipelined ACK to reduce serial overhead
+          if (state == WAITING || chunksReceived >= CHUNKS_IN_FLIGHT) {
+            Serial.write(FLOW_READY);
+            chunksReceived = 0;
+          }
+        } else {
+          // Bad checksum or no room - send NAK so Python can retry
+          Serial.write(FLOW_NAK);
+        }
+
+        rxState = RX_IDLE;
+        break;
     }
   }
 
-  // Check if we have room
-  if (bufferFree() < length) {
-    // No room - NAK and discard the data
-    for (uint8_t i = 0; i <= length; i++) Serial.read();
-    Serial.write(FLOW_NAK);
-    return false;
+  // If we have pending ACKs and buffer space, send READY
+  if (chunksReceived > 0 && bufferFree() >= CHUNK_SIZE) {
+    Serial.write(FLOW_READY);
+    chunksReceived = 0;
   }
-
-  // Read and verify checksum
-  uint8_t checksum = length;
-  uint8_t tempBuf[CHUNK_SIZE];
-
-  for (uint8_t i = 0; i < length; i++) {
-    tempBuf[i] = Serial.read();
-    checksum ^= tempBuf[i];
-  }
-
-  uint8_t receivedChecksum = Serial.read();
-
-  if (checksum != receivedChecksum) {
-    Serial.write(FLOW_NAK);
-    return false;
-  }
-
-  // Checksum OK - copy to ring buffer
-  for (uint8_t i = 0; i < length; i++) {
-    bufferWrite(tempBuf[i]);
-  }
-
-  // Send ACK, and READY if we have room for another chunk
-  Serial.write(FLOW_READY);  // ACK + READY combined (just use READY as ACK)
-
-  return true;
 }
 
 // =============================================================================
@@ -286,21 +310,6 @@ int32_t processCommand() {
       int8_t delta2 = (int8_t)(packed & 0x0F) - 8;
       lastDacSample += delta2;
       board.writeDAC(lastDacSample);
-    }
-    return 0;
-  }
-
-  // Handle DAC data block (CMD_DAC_DATA_BLOCK = 0x80 with length)
-  if (cmd == CMD_DAC_DATA_BLOCK) {
-    if (bufferAvailable() < 2) return -2;
-    uint8_t len = bufferPeekAt(1);
-    if (bufferAvailable() < (uint16_t)(2 + len)) return -2;
-
-    bufferRead();  // cmd
-    bufferRead();  // len
-
-    for (uint8_t i = 0; i < len; i++) {
-      board.writeDAC(bufferRead());
     }
     return 0;
   }
@@ -430,13 +439,13 @@ void updatePlayback() {
 // =============================================================================
 
 void loop() {
+  // Always receive data - it's non-blocking now
+  receiveData();
+
   switch (state) {
     case WAITING:
-      // Try to receive chunks
-      receiveChunk();
-
-      // Start playing once we have enough data
-      if (bufferAvailable() >= BUFFER_SIZE / 4 && !streamEnded) {
+      // Start playing once buffer is well-filled
+      if (bufferAvailable() >= BUFFER_FILL_BEFORE_PLAY && !streamEnded) {
         state = PLAYING;
         nextCommandTime = micros();
         lastDacSample = 0x80;
@@ -444,14 +453,8 @@ void loop() {
       break;
 
     case PLAYING:
-      // Process playback first (timing critical)
+      // Process playback (timing critical)
       updatePlayback();
-
-      // Then try to receive more data (non-blocking)
-      // Only check for chunks if buffer is getting low
-      if (bufferFree() >= CHUNK_SIZE && Serial.available() >= 2) {
-        receiveChunk();
-      }
 
       // Check if stream ended
       if (streamEnded && bufferEmpty()) {
@@ -465,6 +468,8 @@ void loop() {
       // Reset state for next song
       bufferHead = bufferTail = 0;
       streamEnded = false;
+      rxState = RX_IDLE;
+      chunksReceived = 0;
       nextCommandTime = 0;
       commandsProcessed = 0;
       lastDacSample = 0x80;
