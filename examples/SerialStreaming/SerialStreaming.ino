@@ -20,7 +20,7 @@
 // Configuration - Auto-detect board capabilities
 // =============================================================================
 
-#define SERIAL_BAUD 500000
+#define SERIAL_BAUD 250000
 
 // Ring buffer size - maximize for each board
 // Uno has 2KB RAM, Mega has 8KB RAM
@@ -133,10 +133,25 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   while (!Serial) { }
 
+  // Wait for serial to stabilize, then drain garbage
+  delay(100);
+  while (Serial.available()) {
+    Serial.read();
+  }
+
   board.begin();
 
-  // Signal ready for initial data
-  Serial.write(FLOW_READY);
+  // Wait for PING before signaling ready
+  while (true) {
+    if (Serial.available()) {
+      uint8_t b = Serial.read();
+      if (b == CMD_PING) {
+        Serial.write(CMD_ACK);
+        Serial.write(FLOW_READY);
+        break;
+      }
+    }
+  }
 }
 
 // =============================================================================
@@ -446,6 +461,9 @@ void loop() {
     case WAITING:
       // Start playing once buffer is well-filled
       if (bufferAvailable() >= BUFFER_FILL_BEFORE_PLAY && !streamEnded) {
+        // Reset the chips to clean state before playing
+        board.reset();
+
         state = PLAYING;
         nextCommandTime = micros();
         lastDacSample = 0x80;

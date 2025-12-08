@@ -1,5 +1,9 @@
 #include "GenesisBoard.h"
 
+#if defined(PLATFORM_ESP32)
+#include "soc/gpio_struct.h"
+#endif
+
 // =============================================================================
 // YM2612 Register Definitions
 // =============================================================================
@@ -51,6 +55,9 @@ void GenesisBoard::begin() {
   digitalWrite(pinA1_Y_, LOW);
   digitalWrite(pinSCK_, LOW);
   digitalWrite(pinSDI_, LOW);
+
+  // Initialize fast GPIO for shift register
+  initFastGPIO();
 
   // Reset both chips
   reset();
@@ -204,20 +211,115 @@ void GenesisBoard::muteAll() {
 // Internal Functions
 // =============================================================================
 
+// -----------------------------------------------------------------------------
+// Fast GPIO Initialization
+// -----------------------------------------------------------------------------
+void GenesisBoard::initFastGPIO() {
+#if defined(PLATFORM_AVR)
+  // Cache port addresses and bitmasks for AVR
+  portSCK_ = portOutputRegister(digitalPinToPort(pinSCK_));
+  portSDI_ = portOutputRegister(digitalPinToPort(pinSDI_));
+  maskSCK_ = digitalPinToBitMask(pinSCK_);
+  maskSDI_ = digitalPinToBitMask(pinSDI_);
+
+#elif defined(PLATFORM_TEENSY4)
+  // Teensy 4.x uses GPIO6/7/8/9 fast registers
+  maskSCK_ = digitalPinToBitMask(pinSCK_);
+  maskSDI_ = digitalPinToBitMask(pinSDI_);
+  portSetSCK_ = portSetRegister(pinSCK_);
+  portClearSCK_ = portClearRegister(pinSCK_);
+  portSetSDI_ = portSetRegister(pinSDI_);
+  portClearSDI_ = portClearRegister(pinSDI_);
+
+#elif defined(PLATFORM_TEENSY3)
+  // Teensy 3.x
+  maskSCK_ = digitalPinToBitMask(pinSCK_);
+  maskSDI_ = digitalPinToBitMask(pinSDI_);
+  portSetSCK_ = portSetRegister(pinSCK_);
+  portClearSCK_ = portClearRegister(pinSCK_);
+  portSetSDI_ = portSetRegister(pinSDI_);
+  portClearSDI_ = portClearRegister(pinSDI_);
+
+#elif defined(PLATFORM_ESP32)
+  // ESP32 - cache pin numbers (GPIO functions are already fast)
+  pinSCK_cached_ = pinSCK_;
+  pinSDI_cached_ = pinSDI_;
+
+#endif
+  // Other platforms use standard digitalWrite (no caching needed)
+}
+
+// -----------------------------------------------------------------------------
+// Optimized Shift Out - Platform Specific
+// -----------------------------------------------------------------------------
 void GenesisBoard::shiftOut8(uint8_t data) {
-  // Bit-bang SPI to CD74HCT164E shift register
-  // MSB first
+#if defined(PLATFORM_AVR)
+  // AVR: Direct port manipulation (~20x faster than digitalWrite)
+  // Unrolled loop for maximum speed
+  uint8_t oldSREG = SREG;
+  cli();  // Disable interrupts for consistent timing
+
+  // Bit 7
+  if (data & 0x80) *portSDI_ |= maskSDI_; else *portSDI_ &= ~maskSDI_;
+  *portSCK_ |= maskSCK_; *portSCK_ &= ~maskSCK_;
+  // Bit 6
+  if (data & 0x40) *portSDI_ |= maskSDI_; else *portSDI_ &= ~maskSDI_;
+  *portSCK_ |= maskSCK_; *portSCK_ &= ~maskSCK_;
+  // Bit 5
+  if (data & 0x20) *portSDI_ |= maskSDI_; else *portSDI_ &= ~maskSDI_;
+  *portSCK_ |= maskSCK_; *portSCK_ &= ~maskSCK_;
+  // Bit 4
+  if (data & 0x10) *portSDI_ |= maskSDI_; else *portSDI_ &= ~maskSDI_;
+  *portSCK_ |= maskSCK_; *portSCK_ &= ~maskSCK_;
+  // Bit 3
+  if (data & 0x08) *portSDI_ |= maskSDI_; else *portSDI_ &= ~maskSDI_;
+  *portSCK_ |= maskSCK_; *portSCK_ &= ~maskSCK_;
+  // Bit 2
+  if (data & 0x04) *portSDI_ |= maskSDI_; else *portSDI_ &= ~maskSDI_;
+  *portSCK_ |= maskSCK_; *portSCK_ &= ~maskSCK_;
+  // Bit 1
+  if (data & 0x02) *portSDI_ |= maskSDI_; else *portSDI_ &= ~maskSDI_;
+  *portSCK_ |= maskSCK_; *portSCK_ &= ~maskSCK_;
+  // Bit 0
+  if (data & 0x01) *portSDI_ |= maskSDI_; else *portSDI_ &= ~maskSDI_;
+  *portSCK_ |= maskSCK_; *portSCK_ &= ~maskSCK_;
+
+  SREG = oldSREG;  // Restore interrupt state
+
+#elif defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3)
+  // Teensy: Use set/clear registers for atomic operations
   for (uint8_t i = 0; i < 8; i++) {
-    // Set data bit
+    if (data & 0x80) {
+      *portSetSDI_ = maskSDI_;
+    } else {
+      *portClearSDI_ = maskSDI_;
+    }
+    data <<= 1;
+    *portSetSCK_ = maskSCK_;
+    *portClearSCK_ = maskSCK_;
+  }
+
+#elif defined(PLATFORM_ESP32)
+  // ESP32: Use GPIO matrix functions (already optimized)
+  for (uint8_t i = 0; i < 8; i++) {
+    GPIO.out_w1tc = (1 << pinSDI_cached_);  // Clear first
+    if (data & 0x80) {
+      GPIO.out_w1ts = (1 << pinSDI_cached_);  // Set if bit is 1
+    }
+    data <<= 1;
+    GPIO.out_w1ts = (1 << pinSCK_cached_);  // Clock high
+    GPIO.out_w1tc = (1 << pinSCK_cached_);  // Clock low
+  }
+
+#else
+  // Fallback: Standard digitalWrite for unknown platforms
+  for (uint8_t i = 0; i < 8; i++) {
     digitalWrite(pinSDI_, (data & 0x80) ? HIGH : LOW);
     data <<= 1;
-
-    // Clock pulse
     digitalWrite(pinSCK_, HIGH);
-    // CD74HCT164E propagation delay is ~40ns, no explicit delay needed
-    // digitalWrite() overhead is typically 100ns+
     digitalWrite(pinSCK_, LOW);
   }
+#endif
 }
 
 uint8_t GenesisBoard::reverseBits(uint8_t b) {

@@ -87,8 +87,11 @@
 // Flow Control
 // =============================================================================
 
-#define FLOW_READY           'R'   // Arduino->Python: Ready for more data
-#define FLOW_NAK             'N'   // Arduino->Python: Buffer full, wait
+// NOTE: These MUST NOT conflict with VGM command bytes!
+// Previously 'R' (0x52) conflicted with CMD_YM2612_WRITE_A0 (0x52)
+// Using ASCII control codes that aren't used in VGM:
+#define FLOW_READY           0x06  // Arduino->Python: Ready for more data (ASCII ACK)
+#define FLOW_NAK             0x15  // Arduino->Python: Bad checksum/retry (ASCII NAK)
 
 // =============================================================================
 // Timing Constants

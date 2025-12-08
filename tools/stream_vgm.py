@@ -59,9 +59,11 @@ CMD_DPCM_BLOCK = 0xC1
 CMD_END_OF_STREAM = 0x66
 CMD_PCM_SEEK = 0xE0
 
-# Flow control
-FLOW_READY = ord('R')
-FLOW_NAK = ord('N')
+# Flow control - MUST match StreamingProtocol.h
+# NOTE: These use ASCII control codes to avoid conflicts with VGM commands
+# Previously 'R' (0x52) conflicted with CMD_YM2612_WRITE_A0 (0x52)
+FLOW_READY = 0x06  # ASCII ACK - ready for more data
+FLOW_NAK = 0x15    # ASCII NAK - bad checksum, retry
 
 # Timing
 FRAME_SAMPLES_NTSC = 735
@@ -71,7 +73,7 @@ FRAME_SAMPLES_PAL = 882
 # Configuration
 # =============================================================================
 
-DEFAULT_BAUD = 500000
+DEFAULT_BAUD = 250000
 
 # Chunk sizes per board type (sent during handshake)
 CHUNK_SIZE_UNO = 64
@@ -529,73 +531,52 @@ def stream_vgm(port, baud, vgm_path, use_dpcm=False, dac_rate=1, dac_bits=8, no_
     # Drain any garbage from reset
     ser.reset_input_buffer()
 
-    # Wait for READY signal
+    # Send PING and wait for ACK+READY handshake
     print("Waiting for Arduino...")
     got_ready = False
-    start = time.time()
 
-    while time.time() - start < 5:
-        if ser.in_waiting:
-            b = ser.read(1)[0]
-            if verbose:
-                print(f"  [0x{b:02X} '{chr(b) if 32 <= b < 127 else '?'}']")
-            if b == FLOW_READY:
-                got_ready = True
-                print("  Arduino ready! (got READY)")
-                break
-            elif b == CMD_ACK:
-                got_ready = True
-                print("  Arduino ready! (got ACK)")
-                break
-        else:
+    for attempt in range(5):
+        if attempt > 0:
+            print(f"  Retry {attempt}...")
+
+        ser.reset_input_buffer()
+        ser.write(bytes([CMD_PING]))
+
+        # Wait for ACK followed by READY
+        got_ack = False
+        timeout = time.time()
+        while time.time() - timeout < 1.0:
+            if ser.in_waiting:
+                b = ser.read(1)[0]
+                if b == CMD_ACK:
+                    got_ack = True
+                elif b == FLOW_READY and got_ack:
+                    got_ready = True
+                    print("  Arduino ready!")
+                    break
             time.sleep(0.01)
 
-    if not got_ready:
-        # Try PING handshake multiple times
-        for attempt in range(3):
-            print(f"  Sending PING (attempt {attempt + 1})...")
-            ser.reset_input_buffer()
-            ser.write(bytes([CMD_PING]))
-            time.sleep(0.2)
-
-            timeout = time.time()
-            while time.time() - timeout < 0.5:
-                if ser.in_waiting:
-                    b = ser.read(1)[0]
-                    if verbose:
-                        print(f"  [0x{b:02X} '{chr(b) if 32 <= b < 127 else '?'}']")
-                    if b == CMD_ACK:
-                        got_ready = True
-                        print("  Got ACK!")
-                        break
-                    elif b == FLOW_READY:
-                        got_ready = True
-                        print("  Got READY!")
-                        break
-                time.sleep(0.01)
-
-            if got_ready:
-                break
+        if got_ready:
+            break
 
     if not got_ready:
         print("\nERROR: No response from Arduino.")
         print("  - Make sure the new firmware is uploaded")
-        print("  - Check that baud rate matches (Arduino: 250000)")
-        print(f"  - Current baud: {baud}")
+        print(f"  - Check that baud rate matches (using {baud})")
         ser.close()
         return False
 
-    # Stream data with pipelined chunked protocol
-    # Use conservative chunk size (works for both Uno and Mega)
-    # The Arduino will accept any chunk <= its CHUNK_SIZE
+    ser.reset_input_buffer()
+
+    # Stream data
     print("\nStreaming...")
     pos = 0
     total = len(stream_data)
     start_time = time.time()
     last_progress = -1
-    chunks_sent = 0
-    acks_received = 0
-    chunk_size = CHUNK_SIZE_UNO  # Use smaller size for compatibility with all boards
+    chunk_size = CHUNK_SIZE_UNO
+    retransmits = 0
+    pending_chunks = []
 
     def send_chunk(data):
         """Send a chunk with header, length, data, and checksum."""
@@ -606,70 +587,83 @@ def stream_vgm(port, baud, vgm_path, use_dpcm=False, dac_rate=1, dac_bits=8, no_
         packet = bytes([CHUNK_HEADER, length]) + data + bytes([checksum & 0xFF])
         ser.write(packet)
 
-    def check_for_ready():
-        """Check for READY/NAK signals (non-blocking). Returns number of READYs received."""
-        count = 0
+    def check_responses():
+        """Check for READY/NAK signals. Returns (acks, naks) count."""
+        acks = 0
+        naks = 0
         while ser.in_waiting:
             b = ser.read(1)[0]
             if b == FLOW_READY:
-                count += 1
+                acks += 1
             elif b == FLOW_NAK:
-                # NAK means Arduino had a problem - count it as a ready to keep flow going
-                # (the chunk was either corrupted or buffer was full, either way move on)
-                count += 1
-                if verbose:
-                    print(f"\n  [NAK]", end="")
-            elif verbose:
-                print(f"\n  [0x{b:02X}]", end="")
-        return count
+                naks += 1
+        return acks, naks
 
-    def wait_for_ready(timeout=2.0):
-        """Wait for at least one READY signal."""
+    def wait_for_response(timeout=0.5):
+        """Wait for READY or NAK. Returns (acks, naks) count."""
         start = time.time()
+        total_acks = 0
+        total_naks = 0
         while time.time() - start < timeout:
-            count = check_for_ready()
-            if count > 0:
-                return count
+            acks, naks = check_responses()
+            total_acks += acks
+            total_naks += naks
+            if total_acks > 0 or total_naks > 0:
+                return total_acks, total_naks
             time.sleep(0.001)
-        return 0
+        return total_acks, total_naks
 
     try:
-        while pos < total:
-            # Send multiple chunks (pipelined)
-            while chunks_sent - acks_received < CHUNKS_IN_FLIGHT and pos < total:
+        while pos < total or pending_chunks:
+            # Send chunks up to pipeline limit
+            while len(pending_chunks) < CHUNKS_IN_FLIGHT and pos < total:
                 chunk_end = min(pos + chunk_size, total)
                 chunk_data = stream_data[pos:chunk_end]
                 send_chunk(chunk_data)
+                pending_chunks.append((pos, chunk_end))
                 pos = chunk_end
-                chunks_sent += 1
 
-            # Check for ACKs (non-blocking most of the time)
-            acks = check_for_ready()
-            acks_received += acks
+            # Check for responses
+            acks, naks = check_responses()
 
-            # If we've sent many chunks without ACK, wait for one
-            if chunks_sent - acks_received >= CHUNKS_IN_FLIGHT:
-                acks = wait_for_ready(0.5)
-                acks_received += acks
-                if acks == 0 and verbose:
-                    print(f"\n  [timeout waiting for ACK]", end="")
+            # Handle NAKs - retransmit
+            if naks > 0:
+                retransmits += naks
+                chunks_to_resend = pending_chunks[:naks]
+                pending_chunks = pending_chunks[naks:]
+                for start_pos, end_pos in chunks_to_resend:
+                    send_chunk(stream_data[start_pos:end_pos])
+                    pending_chunks.append((start_pos, end_pos))
 
-            # Progress display (update every 1%)
-            progress = pos * 100 // total
+            # Handle ACKs
+            if acks > 0:
+                pending_chunks = pending_chunks[acks:]
+
+            # If pipeline full, wait for response
+            if len(pending_chunks) >= CHUNKS_IN_FLIGHT:
+                acks, naks = wait_for_response(0.1)
+                if naks > 0:
+                    retransmits += naks
+                    chunks_to_resend = pending_chunks[:naks]
+                    pending_chunks = pending_chunks[naks:]
+                    for start_pos, end_pos in chunks_to_resend:
+                        send_chunk(stream_data[start_pos:end_pos])
+                        pending_chunks.append((start_pos, end_pos))
+                if acks > 0:
+                    pending_chunks = pending_chunks[acks:]
+
+            # Progress display
+            confirmed_pos = pos - sum(end - start for start, end in pending_chunks)
+            progress = confirmed_pos * 100 // total if total > 0 else 100
             if progress != last_progress:
                 last_progress = progress
                 elapsed = time.time() - start_time
-                if elapsed > 0:
-                    rate = pos / elapsed / 1024
-                    bar_width = 30
-                    filled = bar_width * pos // total
-                    bar = "=" * filled + "-" * (bar_width - filled)
-                    inflight = chunks_sent - acks_received
-                    print(f"\r  [{bar}] {progress}% {rate:.1f}KB/s q:{inflight}", end="", flush=True)
+                rate = confirmed_pos / elapsed / 1024 if elapsed > 0 else 0
+                print(f"\r  {progress}% {rate:.1f}KB/s q:{len(pending_chunks)} rtx:{retransmits}   ", end="", flush=True)
 
         # Send end marker and wait for final ACK
         ser.write(bytes([CHUNK_END]))
-        wait_for_ready(1.0)
+        wait_for_response(1.0)
 
         print(f"\n\nStream complete! Waiting for playback...")
 

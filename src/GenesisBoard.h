@@ -99,12 +99,33 @@ private:
   static constexpr uint32_t YM_BUSY_US = 5;    // YM2612 busy flag duration
   static constexpr uint32_t PSG_BUSY_US = 9;   // SN76489 write delay
 
+  // Fast GPIO - cached port/bitmask for direct port manipulation
+#if defined(PLATFORM_AVR)
+  volatile uint8_t* portSCK_;
+  volatile uint8_t* portSDI_;
+  uint8_t maskSCK_;
+  uint8_t maskSDI_;
+#elif defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3)
+  volatile uint32_t* portSetSCK_;
+  volatile uint32_t* portClearSCK_;
+  volatile uint32_t* portSetSDI_;
+  volatile uint32_t* portClearSDI_;
+  uint32_t maskSCK_;
+  uint32_t maskSDI_;
+#elif defined(PLATFORM_ESP32)
+  uint8_t pinSCK_cached_;
+  uint8_t pinSDI_cached_;
+#endif
+
   // -------------------------------------------------------------------------
   // Internal Functions
   // -------------------------------------------------------------------------
 
-  // Shift out 8 bits to the CD74HCT164E
+  // Shift out 8 bits to the CD74HCT164E (optimized per platform)
   void shiftOut8(uint8_t data);
+
+  // Initialize fast GPIO (called from begin())
+  void initFastGPIO();
 
   // Bit reversal for SN76489 (board wiring)
   uint8_t reverseBits(uint8_t b);
