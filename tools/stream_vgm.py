@@ -71,16 +71,20 @@ FRAME_SAMPLES_PAL = 882
 
 DEFAULT_BAUD = 500000
 
-# Chunk sizes per board type (sent during handshake)
-CHUNK_SIZE_UNO = 64
-CHUNK_SIZE_MEGA = 128
-CHUNK_SIZE_DEFAULT = 64  # Conservative default
+# Board types
+BOARD_TYPE_UNO = 1
+BOARD_TYPE_MEGA = 2
+BOARD_TYPE_OTHER = 3
+
+# Board-specific settings: (chunk_size, chunks_in_flight)
+BOARD_SETTINGS = {
+    BOARD_TYPE_UNO: (64, 1),    # Uno: test with 1 chunk at a time
+    BOARD_TYPE_MEGA: (128, 3),  # Mega: larger buffer
+    BOARD_TYPE_OTHER: (128, 3), # Default for other boards
+}
 
 CHUNK_HEADER = 0x01
 CHUNK_END = 0x02
-
-# Pipelined flow control - send multiple chunks before waiting for ACK
-CHUNKS_IN_FLIGHT = 3
 
 # =============================================================================
 # Utility Functions
@@ -513,9 +517,10 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
     # Drain any garbage from reset
     ser.reset_input_buffer()
 
-    # Send PING and wait for ACK+READY handshake
+    # Send PING and wait for ACK+BOARD_TYPE+READY handshake
     print("Waiting for Arduino...")
     got_ready = False
+    board_type = None
 
     for attempt in range(5):
         if attempt > 0:
@@ -524,7 +529,7 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
         ser.reset_input_buffer()
         ser.write(bytes([CMD_PING]))
 
-        # Wait for ACK followed by READY
+        # Wait for ACK, BOARD_TYPE, then READY
         got_ack = False
         timeout = time.time()
         while time.time() - timeout < 1.0:
@@ -532,9 +537,12 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
                 b = ser.read(1)[0]
                 if b == CMD_ACK:
                     got_ack = True
-                elif b == FLOW_READY and got_ack:
+                elif got_ack and board_type is None and b in BOARD_SETTINGS:
+                    board_type = b
+                elif b == FLOW_READY and got_ack and board_type is not None:
                     got_ready = True
-                    print("  Arduino ready!")
+                    board_name = {1: "Uno", 2: "Mega", 3: "Other"}.get(board_type, "Unknown")
+                    print(f"  Arduino ready! (Board: {board_name})")
                     break
             time.sleep(0.01)
 
@@ -548,6 +556,9 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
         ser.close()
         return False
 
+    # Get board-specific settings
+    chunk_size, chunks_in_flight = BOARD_SETTINGS.get(board_type, (64, 2))
+
     ser.reset_input_buffer()
 
     # Stream data
@@ -556,12 +567,14 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
     total = len(stream_data)
     start_time = time.time()
     last_progress = -1
-    chunk_size = CHUNK_SIZE_UNO
     retransmits = 0
     pending_chunks = []
+    chunks_sent = 0  # Debug counter
 
     def send_chunk(data):
         """Send a chunk with header, length, data, and checksum."""
+        nonlocal chunks_sent
+        chunks_sent += 1
         length = len(data)
         checksum = length
         for b in data:
@@ -641,7 +654,7 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
                     current_label = f"[{loop_number}/{loop_count}] "
 
             # Send chunks up to pipeline limit
-            while len(pending_chunks) < CHUNKS_IN_FLIGHT and pos < len(current_data):
+            while len(pending_chunks) < chunks_in_flight and pos < len(current_data):
                 chunk_end = min(pos + chunk_size, len(current_data))
                 chunk_data = current_data[pos:chunk_end]
                 send_chunk(chunk_data)
@@ -665,7 +678,7 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
                 pending_chunks = pending_chunks[acks:]
 
             # If pipeline full or done sending, wait for responses
-            if pending_chunks and (len(pending_chunks) >= CHUNKS_IN_FLIGHT or pos >= len(current_data)):
+            if pending_chunks and (len(pending_chunks) >= chunks_in_flight or pos >= len(current_data)):
                 acks, naks = wait_for_response(0.1)
                 if naks > 0:
                     retransmits += naks
@@ -737,6 +750,7 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
         elapsed = time.time() - start_time
         print(f"\nStats:")
         print(f"  Total bytes streamed: {total_bytes_streamed:,}")
+        print(f"  Chunks sent: {chunks_sent}, NAKs: {retransmits} ({retransmits*100//max(chunks_sent,1)}%)")
         if is_looping:
             print(f"  Loops: {loop_number}")
         print(f"  Time: {elapsed:.1f}s")

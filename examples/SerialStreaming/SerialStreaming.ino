@@ -31,6 +31,7 @@
   #define BUFFER_MASK 0x1FF  // BUFFER_SIZE - 1
   #define CHUNK_SIZE 64
   #define BUFFER_FILL_BEFORE_PLAY 384  // 75% full before starting
+  #define CHUNKS_IN_FLIGHT 1  // Test: 1 chunk at a time
   #define BOARD_TYPE 1  // Uno
 #elif defined(__AVR_ATmega2560__)
   // Mega: Plenty of RAM
@@ -38,6 +39,7 @@
   #define BUFFER_MASK 0x7FF  // BUFFER_SIZE - 1
   #define CHUNK_SIZE 128
   #define BUFFER_FILL_BEFORE_PLAY 1536  // 75% full before starting
+  #define CHUNKS_IN_FLIGHT 3
   #define BOARD_TYPE 2  // Mega
 #else
   // Other boards (Teensy, etc)
@@ -45,15 +47,13 @@
   #define BUFFER_MASK 0xFFF  // BUFFER_SIZE - 1
   #define CHUNK_SIZE 128
   #define BUFFER_FILL_BEFORE_PLAY 3072
+  #define CHUNKS_IN_FLIGHT 3
   #define BOARD_TYPE 3  // Other
 #endif
 
 // Chunk protocol
 #define CHUNK_HEADER 0x01
 #define CHUNK_END    0x02
-
-// Flow control - how many chunks can be "in flight" before needing ACK
-#define CHUNKS_IN_FLIGHT 3
 
 // =============================================================================
 // Pin Configuration
@@ -161,6 +161,7 @@ void setup() {
       uint8_t b = Serial.read();
       if (b == CMD_PING) {
         Serial.write(CMD_ACK);
+        Serial.write(BOARD_TYPE);
         Serial.write(FLOW_READY);
         break;
       }
