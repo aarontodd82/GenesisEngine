@@ -455,8 +455,7 @@ void updatePlayback() {
     }
 
     // result == 0: chip write, continue processing
-    // Check serial periodically to prevent overflow (256-byte buffer)
-    // At 500kbaud, buffer fills ~50 bytes/ms, so check every 16 commands
+    // Check serial periodically to prevent overflow
     if (++cmdCount >= 16) {
       receiveData();
       cmdCount = 0;
@@ -476,9 +475,6 @@ void loop() {
     case WAITING:
       // Start playing once buffer is well-filled
       if (bufferAvailable() >= BUFFER_FILL_BEFORE_PLAY && !streamEnded) {
-        // Reset the chips to clean state before playing
-        board.reset();
-
         state = PLAYING;
         nextCommandTime = micros();
       }
