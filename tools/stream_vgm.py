@@ -124,6 +124,13 @@ def parse_vgm_header(data):
     version = struct.unpack('<I', data[0x08:0x0C])[0]
     total_samples = struct.unpack('<I', data[0x18:0x1C])[0]
 
+    # Loop offset is relative to 0x1C
+    loop_offset_rel = struct.unpack('<I', data[0x1C:0x20])[0]
+    loop_offset = (0x1C + loop_offset_rel) if loop_offset_rel else 0
+
+    # Loop samples (how long the loop section is)
+    loop_samples = struct.unpack('<I', data[0x20:0x24])[0]
+
     if version >= 0x150:
         data_offset_rel = struct.unpack('<I', data[0x34:0x38])[0]
         data_offset = 0x34 + data_offset_rel if data_offset_rel else 0x40
@@ -135,6 +142,8 @@ def parse_vgm_header(data):
         'data_offset': data_offset,
         'total_samples': total_samples,
         'duration': total_samples / 44100.0,
+        'loop_offset': loop_offset,
+        'loop_samples': loop_samples,
     }
 
 
@@ -142,12 +151,17 @@ def parse_vgm_header(data):
 # VGM Processing
 # =============================================================================
 
-def preprocess_vgm(data, data_offset):
+def preprocess_vgm(data, data_offset, loop_offset=0):
     """
     Preprocess VGM data:
     1. Extract PCM data block
     2. Inline DAC bytes for 0x80-0x8F commands
     3. Convert to stream of (command_byte, args) tuples
+    4. Track loop point index if loop_offset is provided
+
+    Returns: (commands, loop_command_index)
+        loop_command_index is the index into commands where the loop starts,
+        or None if no loop point.
     """
     # First pass: extract PCM data block
     pcm_data = None
@@ -187,8 +201,13 @@ def preprocess_vgm(data, data_offset):
     commands = []
     pos = data_offset
     pcm_pos = 0
+    loop_command_index = None
 
     while pos < len(data):
+        # Check if this position is the loop point
+        if loop_offset and pos == loop_offset and loop_command_index is None:
+            loop_command_index = len(commands)
+
         cmd = data[pos]
 
         if cmd == 0x67:  # Skip data block
@@ -245,18 +264,21 @@ def preprocess_vgm(data, data_offset):
         else:
             pos += 1
 
-    return commands
+    return commands, loop_command_index
 
 
-def apply_wait_optimization(commands):
+def apply_wait_optimization(commands, loop_index=None):
     """
     Optimize wait commands:
     1. Merge consecutive waits into single CMD_WAIT_FRAMES
     2. Convert small waits to short wait commands (0x70-0x7F)
     3. Use RLE for runs of frame waits
+
+    Returns: (optimized_commands, new_loop_index)
     """
     optimized = []
     i = 0
+    new_loop_index = None
 
     def get_wait_samples(cmd, args):
         """Extract wait samples from a command."""
@@ -274,6 +296,10 @@ def apply_wait_optimization(commands):
         return cmd in (CMD_WAIT_NTSC, CMD_WAIT_PAL, CMD_WAIT_FRAMES) or (0x70 <= cmd <= 0x7F)
 
     while i < len(commands):
+        # Track loop index mapping
+        if loop_index is not None and i == loop_index:
+            new_loop_index = len(optimized)
+
         cmd, args = commands[i]
 
         # Accumulate consecutive waits
@@ -281,8 +307,11 @@ def apply_wait_optimization(commands):
             total_samples = get_wait_samples(cmd, args)
             j = i + 1
 
-            # Merge consecutive waits
+            # Merge consecutive waits, but stop if we hit the loop point
             while j < len(commands) and is_wait_cmd(commands[j][0]):
+                # Don't merge past the loop point
+                if loop_index is not None and j == loop_index:
+                    break
                 total_samples += get_wait_samples(commands[j][0], commands[j][1])
                 j += 1
 
@@ -322,17 +351,23 @@ def apply_wait_optimization(commands):
         optimized.append((cmd, args))
         i += 1
 
-    return optimized
+    return optimized, new_loop_index
 
 
-def strip_dac(commands):
+def strip_dac(commands, loop_index=None):
     """
     Remove all DAC commands, converting them to waits.
     Preserves timing by keeping the wait portion of 0x80-0x8F commands.
+
+    Returns: (stripped_commands, new_loop_index)
     """
     stripped = []
+    new_loop_index = None
 
-    for cmd, args in commands:
+    for i, (cmd, args) in enumerate(commands):
+        if loop_index is not None and i == loop_index:
+            new_loop_index = len(stripped)
+
         # DAC + wait commands (0x80-0x8F)
         if 0x80 <= cmd <= 0x8F:
             # Extract wait portion and convert to short wait
@@ -343,23 +378,29 @@ def strip_dac(commands):
         else:
             stripped.append((cmd, args))
 
-    return stripped
+    return stripped, new_loop_index
 
 
-def apply_dac_rate_reduction(commands, dac_rate=1):
+def apply_dac_rate_reduction(commands, dac_rate=1, loop_index=None):
     """
     Reduce DAC sample rate by skipping samples.
     - dac_rate: 1 = full rate, 2 = half rate, 4 = quarter rate
 
     This directly reduces command count, which is the main throughput bottleneck.
+
+    Returns: (compressed_commands, new_loop_index)
     """
     if dac_rate == 1:
-        return commands  # No reduction
+        return commands, loop_index  # No reduction
 
     compressed = []
     dac_count = 0
+    new_loop_index = None
 
-    for cmd, args in commands:
+    for i, (cmd, args) in enumerate(commands):
+        if loop_index is not None and i == loop_index:
+            new_loop_index = len(compressed)
+
         # DAC + wait commands (0x80-0x8F)
         if 0x80 <= cmd <= 0x8F and args:
             dac_count += 1
@@ -376,24 +417,37 @@ def apply_dac_rate_reduction(commands, dac_rate=1):
         else:
             compressed.append((cmd, args))
 
-    return compressed
+    return compressed, new_loop_index
 
 
-def commands_to_bytes(commands):
-    """Convert command list to raw bytes."""
+def commands_to_bytes(commands, loop_index=None):
+    """Convert command list to raw bytes.
+
+    Returns: (bytes, loop_byte_offset)
+        loop_byte_offset is the byte offset where the loop starts, or None.
+    """
     output = bytearray()
-    for cmd, args in commands:
+    loop_byte_offset = None
+
+    for i, (cmd, args) in enumerate(commands):
+        if loop_index is not None and i == loop_index:
+            loop_byte_offset = len(output)
         output.append(cmd)
         output.extend(args)
-    return bytes(output)
+
+    return bytes(output), loop_byte_offset
 
 
 # =============================================================================
 # Streaming
 # =============================================================================
 
-def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, verbose=False):
-    """Stream VGM file using binary protocol."""
+def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, verbose=False):
+    """Stream VGM file using binary protocol.
+
+    Args:
+        loop_count: None = no looping, 0 = infinite, N = play N times total
+    """
 
     # Load file
     print(f"\nLoading: {os.path.basename(vgm_path)}")
@@ -412,28 +466,39 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, verbose=False):
 
     print(f"  Duration: {int(header['duration']//60)}:{int(header['duration']%60):02d}")
 
+    # Show loop info
+    has_vgm_loop = header['loop_offset'] > 0
+    if has_vgm_loop:
+        loop_duration = header['loop_samples'] / 44100.0
+        print(f"  VGM loop point: {int(loop_duration//60)}:{int(loop_duration%60):02d} loop section")
+    elif loop_count is not None:
+        print(f"  No VGM loop point (will restart from beginning)")
+
     # Preprocess VGM
     print("  Preprocessing VGM...")
-    commands = preprocess_vgm(data, header['data_offset'])
+    commands, loop_index = preprocess_vgm(data, header['data_offset'], header['loop_offset'])
     original_cmd_count = len(commands)
     original_bytes = sum(1 + len(args) for cmd, args in commands)
 
     # Apply DAC processing
     if no_dac:
-        commands = strip_dac(commands)
+        commands, loop_index = strip_dac(commands, loop_index)
         print(f"  DAC stripped (FM/PSG only)")
     elif dac_rate > 1:
-        commands = apply_dac_rate_reduction(commands, dac_rate)
+        commands, loop_index = apply_dac_rate_reduction(commands, dac_rate, loop_index)
         print(f"  DAC rate reduction: 1/{dac_rate} (keeping every {dac_rate}th sample)")
 
     # Apply wait optimization (merges and RLE)
-    commands = apply_wait_optimization(commands)
+    commands, loop_index = apply_wait_optimization(commands, loop_index)
     print(f"  Wait optimization: {original_cmd_count} -> {len(commands)} commands")
 
     # Convert to bytes
-    stream_data = commands_to_bytes(commands)
+    stream_data, loop_byte_offset = commands_to_bytes(commands, loop_index)
     compression_ratio = len(stream_data) / original_bytes * 100 if original_bytes > 0 else 100
     print(f"  Stream size: {len(stream_data):,} bytes ({compression_ratio:.1f}% of original)")
+
+    if loop_byte_offset is not None:
+        print(f"  Loop byte offset: {loop_byte_offset:,}")
 
     # Connect
     print(f"\nConnecting to {port} at {baud} baud...")
@@ -531,11 +596,54 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, verbose=False):
         return total_acks, total_naks
 
     try:
-        while pos < total or pending_chunks:
+        # Determine loop behavior
+        # loop_count: None = no looping, 0 = infinite, N = play N times total
+        is_looping = loop_count is not None
+        plays_remaining = None
+        if loop_count is not None:
+            if loop_count == 0:
+                plays_remaining = -1  # Infinite
+            else:
+                plays_remaining = loop_count
+
+        # For looping: we need to strip the END_OF_STREAM command from the data
+        # and only send it when we're truly done
+        if is_looping:
+            # Remove trailing END_OF_STREAM (0x66) if present
+            if stream_data and stream_data[-1] == CMD_END_OF_STREAM:
+                stream_data_main = stream_data[:-1]
+            else:
+                stream_data_main = stream_data
+
+            # Loop section is from loop point to end (without END_OF_STREAM)
+            loop_start = loop_byte_offset if loop_byte_offset else 0
+            stream_data_loop = stream_data_main[loop_start:]
+        else:
+            stream_data_main = stream_data
+
+        # Streaming state
+        pos = 0
+        total_bytes_streamed = 0
+        loop_number = 1
+        pending_chunks = []
+        last_progress = -1
+
+        # Which data are we currently streaming?
+        current_data = stream_data_main
+        current_label = ""
+
+        while True:
+            # Update label for display
+            if is_looping:
+                if plays_remaining == -1:
+                    current_label = f"[Loop {loop_number}] "
+                else:
+                    current_label = f"[{loop_number}/{loop_count}] "
+
             # Send chunks up to pipeline limit
-            while len(pending_chunks) < CHUNKS_IN_FLIGHT and pos < total:
-                chunk_end = min(pos + chunk_size, total)
-                chunk_data = stream_data[pos:chunk_end]
+            while len(pending_chunks) < CHUNKS_IN_FLIGHT and pos < len(current_data):
+                chunk_end = min(pos + chunk_size, len(current_data))
+                chunk_data = current_data[pos:chunk_end]
                 send_chunk(chunk_data)
                 pending_chunks.append((pos, chunk_end))
                 pos = chunk_end
@@ -548,35 +656,68 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, verbose=False):
                 retransmits += naks
                 chunks_to_resend = pending_chunks[:naks]
                 pending_chunks = pending_chunks[naks:]
-                for start_pos, end_pos in chunks_to_resend:
-                    send_chunk(stream_data[start_pos:end_pos])
-                    pending_chunks.append((start_pos, end_pos))
+                for s_pos, e_pos in chunks_to_resend:
+                    send_chunk(current_data[s_pos:e_pos])
+                    pending_chunks.append((s_pos, e_pos))
 
             # Handle ACKs
             if acks > 0:
                 pending_chunks = pending_chunks[acks:]
 
-            # If pipeline full, wait for response
-            if len(pending_chunks) >= CHUNKS_IN_FLIGHT:
+            # If pipeline full or done sending, wait for responses
+            if pending_chunks and (len(pending_chunks) >= CHUNKS_IN_FLIGHT or pos >= len(current_data)):
                 acks, naks = wait_for_response(0.1)
                 if naks > 0:
                     retransmits += naks
                     chunks_to_resend = pending_chunks[:naks]
                     pending_chunks = pending_chunks[naks:]
-                    for start_pos, end_pos in chunks_to_resend:
-                        send_chunk(stream_data[start_pos:end_pos])
-                        pending_chunks.append((start_pos, end_pos))
+                    for s_pos, e_pos in chunks_to_resend:
+                        send_chunk(current_data[s_pos:e_pos])
+                        pending_chunks.append((s_pos, e_pos))
                 if acks > 0:
                     pending_chunks = pending_chunks[acks:]
 
             # Progress display
             confirmed_pos = pos - sum(end - start for start, end in pending_chunks)
-            progress = confirmed_pos * 100 // total if total > 0 else 100
+            progress = confirmed_pos * 100 // len(current_data) if len(current_data) > 0 else 100
             if progress != last_progress:
                 last_progress = progress
                 elapsed = time.time() - start_time
-                rate = confirmed_pos / elapsed / 1024 if elapsed > 0 else 0
-                print(f"\r  {progress}% {rate:.1f}KB/s q:{len(pending_chunks)} rtx:{retransmits}   ", end="", flush=True)
+                total_confirmed = total_bytes_streamed + confirmed_pos
+                rate = total_confirmed / elapsed / 1024 if elapsed > 0 else 0
+                print(f"\r  {current_label}{progress}% {rate:.1f}KB/s q:{len(pending_chunks)} rtx:{retransmits}   ", end="", flush=True)
+
+            # Check if we've finished current data section
+            if pos >= len(current_data):
+                # Are we looping?
+                if is_looping:
+                    # Check if we should continue looping
+                    if plays_remaining == -1:
+                        # Infinite loop - continue
+                        pass
+                    elif plays_remaining > 1:
+                        plays_remaining -= 1
+                    else:
+                        # Done looping - wait for pending chunks then exit
+                        if not pending_chunks:
+                            ser.write(bytes([CMD_END_OF_STREAM]))
+                            total_bytes_streamed += len(current_data)
+                            break
+                        continue  # Keep waiting for ACKs
+
+                    # Start next loop iteration immediately
+                    # Don't wait for pending_chunks - just keep streaming
+                    total_bytes_streamed += len(current_data)
+                    loop_number += 1
+                    pos = 0
+                    last_progress = -1
+                    current_data = stream_data_loop
+                    print(f"\n  Starting loop {loop_number}...")
+                else:
+                    # Not looping - wait for pending chunks then exit
+                    if not pending_chunks:
+                        total_bytes_streamed += len(current_data)
+                        break
 
         # Send end marker and wait for final ACK
         ser.write(bytes([CHUNK_END]))
@@ -584,21 +725,23 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, verbose=False):
 
         print(f"\n\nStream complete! Waiting for playback...")
 
-        # Monitor for end
+        # Wait for playback to finish
         end_wait_start = time.time()
-        while time.time() - end_wait_start < 3:
+        while time.time() - end_wait_start < 600:
             if ser.in_waiting:
                 b = ser.read(1)[0]
                 if b == FLOW_READY:
                     print("  Playback finished!")
                     break
-            time.sleep(0.1)
+            time.sleep(0.05)
 
         elapsed = time.time() - start_time
         print(f"\nStats:")
-        print(f"  Total bytes: {total:,}")
+        print(f"  Total bytes streamed: {total_bytes_streamed:,}")
+        if is_looping:
+            print(f"  Loops: {loop_number}")
         print(f"  Time: {elapsed:.1f}s")
-        print(f"  Average rate: {total / elapsed / 1024:.1f} KB/s")
+        print(f"  Average rate: {total_bytes_streamed / elapsed / 1024:.1f} KB/s")
 
         ser.close()
         return True
@@ -623,11 +766,17 @@ Examples:
     python stream_vgm.py song.vgz --port /dev/ttyUSB0
     python stream_vgm.py song.vgm --dac-rate 2   # Half DAC sample rate
     python stream_vgm.py song.vgm --no-dac       # FM/PSG only, no DAC
+    python stream_vgm.py song.vgm --loop         # Loop forever
+    python stream_vgm.py song.vgm --loop 3       # Loop 3 times
 
 DAC Options (for songs with PCM/DAC audio):
     --dac-rate 2   Skip every other DAC sample (halves commands)
     --dac-rate 4   Keep 1 in 4 DAC samples (quarters commands)
     --no-dac       Strip all DAC data (FM/PSG only)
+
+Looping:
+    --loop         Loop forever (Ctrl+C to stop)
+    --loop N       Play N times total (e.g., --loop 3 plays 3 times)
         """
     )
 
@@ -641,6 +790,8 @@ DAC Options (for songs with PCM/DAC audio):
                         help='DAC sample rate divisor (1=full, 2=half, 4=quarter)')
     parser.add_argument('--no-dac', action='store_true',
                         help='Strip all DAC/PCM data (FM/PSG only, smallest size)')
+    parser.add_argument('--loop', nargs='?', const=0, type=int, default=None, metavar='N',
+                        help='Loop playback: --loop for infinite, --loop N to play N times')
     parser.add_argument('--verbose', '-v', action='store_true',
                         help='Verbose output')
 
@@ -657,6 +808,7 @@ DAC Options (for songs with PCM/DAC audio):
         print("  --baud BAUD      Baud rate (default: 500000)")
         print("  --dac-rate N     DAC sample rate divisor (1, 2, or 4)")
         print("  --no-dac         Strip all DAC data (FM/PSG only)")
+        print("  --loop [N]       Loop forever (--loop) or N times (--loop 3)")
         print("  --list-ports     List available serial ports")
         return 1
 
@@ -676,6 +828,7 @@ DAC Options (for songs with PCM/DAC audio):
         args.file,
         dac_rate=args.dac_rate,
         no_dac=args.no_dac,
+        loop_count=args.loop,
         verbose=args.verbose
     )
     return 0 if success else 1
