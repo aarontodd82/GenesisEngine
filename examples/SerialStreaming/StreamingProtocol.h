@@ -53,12 +53,6 @@
 // DAC Commands
 // =============================================================================
 
-#define CMD_START_DAC_STREAM 0x67  // Prepare YM2612 for DAC stream
-                                   // Args: none (data block header follows in VGM)
-
-#define CMD_DAC_DATA_BLOCK   0x80  // DAC data block
-                                   // Args: uint8_t len, uint8_t data[len]
-
 // Commands 0x80-0x8F in VGM: Write DAC + wait (cmd & 0x0F) samples
 // These are handled specially with inlined PCM data
 
@@ -68,10 +62,6 @@
 
 #define CMD_RLE_WAIT_FRAME_1 0xC0  // RLE: Wait for N single frames
                                    // Args: uint8_t count (2-255)
-
-#define CMD_DPCM_BLOCK       0xC1  // DPCM compressed DAC data
-                                   // Args: uint8_t len, uint8_t packed_deltas[len]
-                                   // Each byte contains two 4-bit signed deltas
 
 // =============================================================================
 // Stream Control

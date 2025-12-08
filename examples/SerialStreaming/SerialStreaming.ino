@@ -136,9 +136,6 @@ uint32_t nextCommandTime = 0;
 // Flow control
 bool streamEnded = false;
 
-// DPCM state
-uint8_t lastDacSample = 0x80;  // Start at midpoint
-
 // Stats
 uint32_t commandsProcessed = 0;
 
@@ -301,9 +298,6 @@ uint8_t commandSize(uint8_t cmd) {
     case CMD_RLE_WAIT_FRAME_1: // 0xC0: 1 byte count
       return 2;
 
-    case CMD_DPCM_BLOCK:      // 0xC1: variable length
-      return 0;  // Special handling needed
-
     case CMD_PCM_SEEK:        // 0xE0: 4 bytes offset
       return 5;
 
@@ -325,35 +319,6 @@ int32_t processCommand() {
   if (bufferEmpty()) return -2;
 
   uint8_t cmd = bufferPeek();
-
-  // Handle variable-length commands
-  if (cmd == CMD_DPCM_BLOCK) {
-    // Need at least 2 bytes to know length
-    if (bufferAvailable() < 2) return -2;
-    uint8_t len = bufferPeekAt(1);
-    if (bufferAvailable() < (uint16_t)(2 + len)) return -2;
-
-    // Consume command and length
-    bufferRead();
-    bufferRead();
-
-    // Process DPCM data - optimized inner loop
-    // Each byte contains two 4-bit deltas (high nibble first)
-    uint8_t sample = lastDacSample;
-    while (len--) {
-      uint8_t packed = bufferRead();
-
-      // High nibble: first delta (-8 to +7)
-      sample += (int8_t)((packed >> 4) & 0x0F) - 8;
-      board.writeDAC(sample);
-
-      // Low nibble: second delta
-      sample += (int8_t)(packed & 0x0F) - 8;
-      board.writeDAC(sample);
-    }
-    lastDacSample = sample;
-    return 0;
-  }
 
   // Fixed-length commands
   uint8_t needed = commandSize(cmd);
@@ -516,7 +481,6 @@ void loop() {
 
         state = PLAYING;
         nextCommandTime = micros();
-        lastDacSample = 0x80;
       }
       break;
 
@@ -540,7 +504,6 @@ void loop() {
       chunksReceived = 0;
       nextCommandTime = 0;
       commandsProcessed = 0;
-      lastDacSample = 0x80;
       state = WAITING;
 
       // Signal ready for new stream

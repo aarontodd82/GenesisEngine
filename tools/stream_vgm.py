@@ -48,12 +48,8 @@ CMD_WAIT_FRAMES = 0x61
 CMD_WAIT_NTSC = 0x62
 CMD_WAIT_PAL = 0x63
 
-# DAC commands
-CMD_DAC_DATA_BLOCK = 0x80
-
 # Compression commands
 CMD_RLE_WAIT_FRAME_1 = 0xC0
-CMD_DPCM_BLOCK = 0xC1
 
 # Stream control
 CMD_END_OF_STREAM = 0x66
@@ -350,16 +346,15 @@ def strip_dac(commands):
     return stripped
 
 
-def apply_dac_compression(commands, dac_rate=1, dac_bits=8):
+def apply_dac_rate_reduction(commands, dac_rate=1):
     """
-    Compress DAC data:
-    - dac_rate: 1 = full rate, 2 = half rate, 4 = quarter rate (skip samples)
-    - dac_bits: 8 = full quality, 6 = reduced, 4 = low quality
+    Reduce DAC sample rate by skipping samples.
+    - dac_rate: 1 = full rate, 2 = half rate, 4 = quarter rate
 
-    Lower rates and bits = smaller data but lower quality.
+    This directly reduces command count, which is the main throughput bottleneck.
     """
-    if dac_rate == 1 and dac_bits == 8:
-        return commands  # No compression
+    if dac_rate == 1:
+        return commands  # No reduction
 
     compressed = []
     dac_count = 0
@@ -370,90 +365,18 @@ def apply_dac_compression(commands, dac_rate=1, dac_bits=8):
             dac_count += 1
 
             # Rate reduction: skip samples
-            if dac_rate > 1 and (dac_count % dac_rate) != 1:
+            if (dac_count % dac_rate) != 1:
                 # Skip this sample, but keep the wait
                 wait = cmd & 0x0F
                 if wait > 0:
                     compressed.append((0x70 + wait - 1, b''))  # Short wait
                 continue
 
-            # Bit reduction: reduce precision
-            if dac_bits < 8:
-                sample = args[0]
-                shift = 8 - dac_bits
-                sample = (sample >> shift) << shift  # Reduce and restore
-                args = bytes([sample])
-
             compressed.append((cmd, args))
         else:
             compressed.append((cmd, args))
 
     return compressed
-
-
-def apply_dpcm_compression(commands):
-    """
-    Apply DPCM compression to DAC data (0x80 commands with 0 wait).
-    Groups consecutive DAC writes and compresses to 4-bit deltas.
-    Achieves ~50% compression on DAC data.
-    """
-    compressed = []
-    i = 0
-
-    while i < len(commands):
-        cmd, args = commands[i]
-
-        # Look for runs of DAC+wait with 0 wait (0x80 only)
-        if cmd == 0x80 and args:
-            dac_samples = [args[0]]
-            j = i + 1
-
-            # Collect consecutive 0x80 samples (DAC write with no wait)
-            while j < len(commands) and commands[j][0] == 0x80 and commands[j][1]:
-                dac_samples.append(commands[j][1][0])
-                j += 1
-
-            # Need at least 4 samples to make DPCM worthwhile
-            if len(dac_samples) >= 4:
-                # Encode as DPCM
-                dpcm_data = encode_dpcm(dac_samples)
-                compressed.append((CMD_DPCM_BLOCK, bytes([len(dpcm_data)]) + dpcm_data))
-                i = j
-                continue
-
-        compressed.append((cmd, args))
-        i += 1
-
-    return compressed
-
-
-def encode_dpcm(samples):
-    """
-    Encode samples as DPCM (4-bit deltas packed into bytes).
-    Each byte contains two 4-bit signed deltas (+8 to make unsigned).
-    """
-    last_sample = 0x80  # Start at midpoint
-    dpcm_bytes = bytearray()
-
-    i = 0
-    while i < len(samples) - 1:
-        # First delta
-        delta1 = samples[i] - last_sample
-        delta1 = max(-8, min(7, delta1))  # Clamp to 4-bit signed
-        last_sample = (last_sample + delta1) & 0xFF
-
-        # Second delta
-        delta2 = samples[i + 1] - last_sample
-        delta2 = max(-8, min(7, delta2))
-        last_sample = (last_sample + delta2) & 0xFF
-
-        # Pack two deltas into one byte (add 8 to make unsigned 0-15)
-        packed = ((delta1 + 8) << 4) | (delta2 + 8)
-        dpcm_bytes.append(packed)
-
-        i += 2
-
-    return bytes(dpcm_bytes)
 
 
 def commands_to_bytes(commands):
@@ -469,7 +392,7 @@ def commands_to_bytes(commands):
 # Streaming
 # =============================================================================
 
-def stream_vgm(port, baud, vgm_path, use_dpcm=False, dac_rate=1, dac_bits=8, no_dac=False, verbose=False):
+def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, verbose=False):
     """Stream VGM file using binary protocol."""
 
     # Load file
@@ -499,19 +422,13 @@ def stream_vgm(port, baud, vgm_path, use_dpcm=False, dac_rate=1, dac_bits=8, no_
     if no_dac:
         commands = strip_dac(commands)
         print(f"  DAC stripped (FM/PSG only)")
-    elif dac_rate > 1 or dac_bits < 8:
-        commands = apply_dac_compression(commands, dac_rate, dac_bits)
-        print(f"  DAC compression: rate=1/{dac_rate}, bits={dac_bits}")
+    elif dac_rate > 1:
+        commands = apply_dac_rate_reduction(commands, dac_rate)
+        print(f"  DAC rate reduction: 1/{dac_rate} (keeping every {dac_rate}th sample)")
 
     # Apply wait optimization (merges and RLE)
     commands = apply_wait_optimization(commands)
     print(f"  Wait optimization: {original_cmd_count} -> {len(commands)} commands")
-
-    # Apply DPCM compression for DAC streams
-    if use_dpcm:
-        before_dpcm = len(commands)
-        commands = apply_dpcm_compression(commands)
-        print(f"  DPCM compression: {before_dpcm} -> {len(commands)} commands")
 
     # Convert to bytes
     stream_data = commands_to_bytes(commands)
@@ -703,17 +620,14 @@ def main():
         epilog="""
 Examples:
     python stream_vgm.py song.vgm --port COM3
-    python stream_vgm.py song.vgz --port /dev/ttyUSB0 --baud 250000
-    python stream_vgm.py song.vgm --dpcm         # Enable DPCM for DAC audio
+    python stream_vgm.py song.vgz --port /dev/ttyUSB0
     python stream_vgm.py song.vgm --dac-rate 2   # Half DAC sample rate
-    python stream_vgm.py song.vgm --dac-bits 6   # Reduce DAC to 6-bit
+    python stream_vgm.py song.vgm --no-dac       # FM/PSG only, no DAC
 
-DAC Compression (for songs with PCM/DAC audio):
-    --dac-rate 2   Skip every other DAC sample (halves data)
-    --dac-rate 4   Keep 1 in 4 DAC samples (quarters data)
-    --dac-bits 6   Reduce to 6-bit DAC (slight quality loss)
-    --dac-bits 4   Reduce to 4-bit DAC (noticeable quality loss)
-    --dpcm         DPCM encoding (50% compression, slight quality loss)
+DAC Options (for songs with PCM/DAC audio):
+    --dac-rate 2   Skip every other DAC sample (halves commands)
+    --dac-rate 4   Keep 1 in 4 DAC samples (quarters commands)
+    --no-dac       Strip all DAC data (FM/PSG only)
         """
     )
 
@@ -723,12 +637,8 @@ DAC Compression (for songs with PCM/DAC audio):
                         help=f'Baud rate (default: {DEFAULT_BAUD})')
     parser.add_argument('--list-ports', '-l', action='store_true',
                         help='List available serial ports')
-    parser.add_argument('--dpcm', action='store_true',
-                        help='Enable DPCM compression for DAC audio')
     parser.add_argument('--dac-rate', type=int, default=1, choices=[1, 2, 4],
                         help='DAC sample rate divisor (1=full, 2=half, 4=quarter)')
-    parser.add_argument('--dac-bits', type=int, default=8, choices=[4, 6, 8],
-                        help='DAC bit depth (8=full, 6=reduced, 4=low)')
     parser.add_argument('--no-dac', action='store_true',
                         help='Strip all DAC/PCM data (FM/PSG only, smallest size)')
     parser.add_argument('--verbose', '-v', action='store_true',
@@ -745,9 +655,8 @@ DAC Compression (for songs with PCM/DAC audio):
         print("\nOptions:")
         print("  --port PORT      Serial port")
         print("  --baud BAUD      Baud rate (default: 500000)")
-        print("  --dpcm           Enable DPCM compression")
         print("  --dac-rate N     DAC sample rate divisor (1, 2, or 4)")
-        print("  --dac-bits N     DAC bit depth (4, 6, or 8)")
+        print("  --no-dac         Strip all DAC data (FM/PSG only)")
         print("  --list-ports     List available serial ports")
         return 1
 
@@ -765,9 +674,7 @@ DAC Compression (for songs with PCM/DAC audio):
         port,
         args.baud,
         args.file,
-        use_dpcm=args.dpcm,
         dac_rate=args.dac_rate,
-        dac_bits=args.dac_bits,
         no_dac=args.no_dac,
         verbose=args.verbose
     )
