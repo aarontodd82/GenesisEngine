@@ -2,7 +2,7 @@
  * StreamingProtocol.h - Binary protocol definitions for VGM streaming
  *
  * This header defines the compact binary protocol used for high-performance
- * serial streaming between Python and Arduino.
+ * serial streaming between Python and the Genesis Engine board.
  *
  * Protocol characteristics:
  *   - Little-endian for multi-byte values (matches AVR native format)
@@ -17,8 +17,8 @@
 // Control Commands
 // =============================================================================
 
-#define CMD_PING             0x00  // Python->Arduino: Is device ready?
-#define CMD_ACK              0x0F  // Arduino->Python: Acknowledgment/ready
+#define CMD_PING             0x00  // PC->Device: Is device ready?
+#define CMD_ACK              0x0F  // Device->PC: Acknowledgment/ready
 
 // =============================================================================
 // Chip Write Commands (matches VGM command bytes)
@@ -80,8 +80,8 @@
 // NOTE: These MUST NOT conflict with VGM command bytes!
 // Previously 'R' (0x52) conflicted with CMD_YM2612_WRITE_A0 (0x52)
 // Using ASCII control codes that aren't used in VGM:
-#define FLOW_READY           0x06  // Arduino->Python: Ready for more data (ASCII ACK)
-#define FLOW_NAK             0x15  // Arduino->Python: Bad checksum/retry (ASCII NAK)
+#define FLOW_READY           0x06  // Device->PC: Ready for more data (ASCII ACK)
+#define FLOW_NAK             0x15  // Device->PC: Bad checksum/retry (ASCII NAK)
 
 // =============================================================================
 // Timing Constants

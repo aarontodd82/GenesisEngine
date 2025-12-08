@@ -1,91 +1,85 @@
 /**
- * SerialStreaming - High-performance VGM streaming over serial
+ * SerialStreaming - Stream VGM files from PC to FM-90s Genesis Engine Board
  *
- * Binary protocol with flow control:
- *   - Python sends: [0x01][length][data...][checksum]
- *   - Arduino responds: 'A' (ACK) or 'N' (NAK)
- *   - Arduino sends 'R' (READY) when buffer has room for more
+ * Pin Connections:
+ *   Control Pins (directly to chips):
+ *     Pin 2  -> WR_P  (PSG active-low write)
+ *     Pin 3  -> WR_Y  (YM2612 active-low write)
+ *     Pin 4  -> IC_Y  (YM2612 active-low reset)
+ *     Pin 5  -> A0_Y  (YM2612 address/data select)
+ *     Pin 6  -> A1_Y  (YM2612 port select)
  *
- * Features:
- *   - Binary VGM commands (no text parsing)
- *   - Non-blocking timing using micros()
- *   - Ring buffer for continuous data flow
- *   - Checksum for data integrity
+ *   Shift Register (hardware SPI pins):
+ *     Board        MOSI (SDI)    SCK
+ *     ----------   ----------    ---
+ *     Uno          11            13
+ *     Mega         51            52
+ *     Teensy 4.x   11            13
+ *     ESP32        23            18
+ *
+ * Usage:
+ *   1. Upload this sketch to your board
+ *   2. Run the Python streaming script:
+ *        python tools/stream_vgm.py song.vgm
+ *        python tools/stream_vgm.py song.vgm --loop
+ *        python tools/stream_vgm.py --help
+ *
+ * Supported boards: Arduino Uno, Arduino Mega, Teensy 4.0/4.1, ESP32
  */
 
 #include <GenesisBoard.h>
 #include "StreamingProtocol.h"
 
 // =============================================================================
-// Configuration - Auto-detect board capabilities
+// Board Configuration (auto-detected)
 // =============================================================================
 
 #define SERIAL_BAUD 1000000
 
-// Ring buffer size - maximize for each board
-// MUST be power of 2 for fast bitmask operations!
-// Uno has 2KB RAM, Mega has 8KB RAM
 #if defined(__AVR_ATmega328P__)
-  // Uno: Use most of available RAM for buffer
   #define BUFFER_SIZE 512
-  #define BUFFER_MASK 0x1FF  // BUFFER_SIZE - 1
+  #define BUFFER_MASK 0x1FF
   #define CHUNK_SIZE 64
-  #define BUFFER_FILL_BEFORE_PLAY 384  // 75% full before starting
-  #define CHUNKS_IN_FLIGHT 1  // Test: 1 chunk at a time
+  #define BUFFER_FILL_BEFORE_PLAY 384
+  #define CHUNKS_IN_FLIGHT 1
   #define BOARD_TYPE 1  // Uno
 #elif defined(__AVR_ATmega2560__)
-  // Mega: Plenty of RAM
   #define BUFFER_SIZE 2048
-  #define BUFFER_MASK 0x7FF  // BUFFER_SIZE - 1
+  #define BUFFER_MASK 0x7FF
   #define CHUNK_SIZE 128
-  #define BUFFER_FILL_BEFORE_PLAY 1536  // 75% full before starting
-  #define CHUNKS_IN_FLIGHT 1  // Match Uno for testing
+  #define BUFFER_FILL_BEFORE_PLAY 1536
+  #define CHUNKS_IN_FLIGHT 1
   #define BOARD_TYPE 2  // Mega
 #elif defined(__IMXRT1062__)
-  // Teensy 4.0/4.1: Plenty of RAM, fast processor
   #define BUFFER_SIZE 4096
-  #define BUFFER_MASK 0xFFF  // BUFFER_SIZE - 1
+  #define BUFFER_MASK 0xFFF
   #define CHUNK_SIZE 128
   #define BUFFER_FILL_BEFORE_PLAY 3072
-  #define CHUNKS_IN_FLIGHT 1  // Match Uno/Mega for consistent behavior
+  #define CHUNKS_IN_FLIGHT 1
   #define BOARD_TYPE 4  // Teensy 4.x
 #else
-  // Other boards
   #define BUFFER_SIZE 4096
-  #define BUFFER_MASK 0xFFF  // BUFFER_SIZE - 1
+  #define BUFFER_MASK 0xFFF
   #define CHUNK_SIZE 128
   #define BUFFER_FILL_BEFORE_PLAY 3072
   #define CHUNKS_IN_FLIGHT 1
   #define BOARD_TYPE 3  // Other
 #endif
 
-// Chunk protocol
 #define CHUNK_HEADER 0x01
 #define CHUNK_END    0x02
 
 // =============================================================================
 // Pin Configuration
 // =============================================================================
-// Control pins - directly connected to chips
+
 const uint8_t PIN_WR_P = 2;
 const uint8_t PIN_WR_Y = 3;
 const uint8_t PIN_IC_Y = 4;
 const uint8_t PIN_A0_Y = 5;
 const uint8_t PIN_A1_Y = 6;
 
-// Shift register pins - directly connected OR use hardware SPI
-// If USE_HARDWARE_SPI is enabled in GenesisBoard.cpp, these are IGNORED
-// and you MUST use the hardware SPI pins instead:
-//
-//   Board        MOSI (SDI)    SCK
-//   ----------   ----------    ---
-//   Uno          11            13
-//   Mega         51            52
-//   Teensy 4.x   11            13
-//   Teensy 3.x   11            13
-//   ESP32        23            18
-//
-// If USE_HARDWARE_SPI is disabled, these custom pins are used:
+// Software SPI pins (only used if USE_HARDWARE_SPI is disabled in GenesisBoard.cpp)
 const uint8_t PIN_SCK  = 7;
 const uint8_t PIN_SDI  = 8;
 

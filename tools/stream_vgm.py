@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-stream_vgm.py - High-performance VGM streaming to Arduino
+stream_vgm.py - High-performance VGM streaming to Genesis Engine
 
 Uses a compact binary protocol for efficient, real-time playback:
   - Direct binary commands (no text parsing overhead)
@@ -495,13 +495,13 @@ def stream_vgm(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=Non
         print(f"ERROR: {e}")
         return False
 
-    time.sleep(2)  # Wait for Arduino reset
+    time.sleep(2)  # Wait for board reset
 
     # Drain any garbage from reset
     ser.reset_input_buffer()
 
     # Send PING and wait for ACK+BOARD_TYPE+READY handshake
-    print("Waiting for Arduino...")
+    print("Waiting for device...")
     got_ready = False
     board_type = None
 
@@ -525,7 +525,7 @@ def stream_vgm(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=Non
                 elif b == FLOW_READY and got_ack and board_type is not None:
                     got_ready = True
                     board_name = {1: "Uno", 2: "Mega", 3: "Other", 4: "Teensy 4.x"}.get(board_type, "Unknown")
-                    print(f"  Arduino ready! (Board: {board_name})")
+                    print(f"  Connected! (Board: {board_name})")
                     break
             time.sleep(0.01)
 
@@ -533,7 +533,7 @@ def stream_vgm(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=Non
             break
 
     if not got_ready:
-        print("\nERROR: No response from Arduino.")
+        print("\nERROR: No response from device.")
         print("  - Make sure the new firmware is uploaded")
         print(f"  - Check that baud rate matches (using {baud})")
         ser.close()
@@ -736,7 +736,7 @@ def stream_vgm(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=Non
                     current_data = stream_data_loop
                     print(f"\n  Starting loop {loop_number}...")
                 else:
-                    # Not looping - send end marker, Arduino will ACK pending chunks
+                    # Not looping - send end marker, device will ACK pending chunks
                     total_bytes_streamed += len(current_data)
                     break
 
@@ -781,7 +781,7 @@ def stream_vgm(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=Non
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Stream VGM files to Arduino using binary protocol",
+        description="Stream VGM files to Genesis Engine board",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -841,7 +841,7 @@ Looping:
 
     port = args.port or find_arduino_port()
     if not port:
-        print("ERROR: Could not find Arduino. Use --port to specify.")
+        print("ERROR: Could not find device. Use --port to specify.")
         list_ports()
         return 1
 
