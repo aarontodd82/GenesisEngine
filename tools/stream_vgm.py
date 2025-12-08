@@ -714,10 +714,9 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
                     current_data = stream_data_loop
                     print(f"\n  Starting loop {loop_number}...")
                 else:
-                    # Not looping - wait for pending chunks then exit
-                    if not pending_chunks:
-                        total_bytes_streamed += len(current_data)
-                        break
+                    # Not looping - send end marker, Arduino will ACK pending chunks
+                    total_bytes_streamed += len(current_data)
+                    break
 
         # Send end marker and wait for final ACK
         ser.write(bytes([CHUNK_END]))

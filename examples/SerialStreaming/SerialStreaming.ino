@@ -198,7 +198,11 @@ void receiveData() {
         // End of stream marker
         if (b == CHUNK_END) {
           streamEnded = true;
-          Serial.write(FLOW_READY);
+          // ACK any pending chunks plus this end marker
+          for (uint8_t i = 0; i <= chunksReceived; i++) {
+            Serial.write(FLOW_READY);
+          }
+          chunksReceived = 0;
           break;
         }
 
@@ -491,7 +495,7 @@ void loop() {
       break;
 
     case STOPPED:
-      board.muteAll();
+      board.reset();  // Full hardware reset to clear any hanging notes
 
       // Reset state for next song
       bufferHead = bufferTail = 0;
