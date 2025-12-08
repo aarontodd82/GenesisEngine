@@ -41,13 +41,21 @@
   #define BUFFER_FILL_BEFORE_PLAY 1536  // 75% full before starting
   #define CHUNKS_IN_FLIGHT 1  // Match Uno for testing
   #define BOARD_TYPE 2  // Mega
-#else
-  // Other boards (Teensy, etc)
+#elif defined(__IMXRT1062__)
+  // Teensy 4.0/4.1: Plenty of RAM, fast processor
   #define BUFFER_SIZE 4096
   #define BUFFER_MASK 0xFFF  // BUFFER_SIZE - 1
   #define CHUNK_SIZE 128
   #define BUFFER_FILL_BEFORE_PLAY 3072
-  #define CHUNKS_IN_FLIGHT 3
+  #define CHUNKS_IN_FLIGHT 1  // Match Uno/Mega for consistent behavior
+  #define BOARD_TYPE 4  // Teensy 4.x
+#else
+  // Other boards
+  #define BUFFER_SIZE 4096
+  #define BUFFER_MASK 0xFFF  // BUFFER_SIZE - 1
+  #define CHUNK_SIZE 128
+  #define BUFFER_FILL_BEFORE_PLAY 3072
+  #define CHUNKS_IN_FLIGHT 1
   #define BOARD_TYPE 3  // Other
 #endif
 
@@ -190,9 +198,19 @@ void receiveData() {
 
     switch (rxState) {
       case RX_IDLE:
-        // Handle PING during WAITING state
-        if (b == CMD_PING && state == WAITING) {
+        // Handle PING - reset everything and go back to WAITING
+        // This allows reconnection after Ctrl+C or disconnect
+        if (b == CMD_PING) {
+          board.reset();
+          bufferHead = bufferTail = 0;
+          streamEnded = false;
+          chunksReceived = 0;
+          nextCommandTime = 0;
+          commandsProcessed = 0;
+          state = WAITING;
           Serial.write(CMD_ACK);
+          Serial.write(BOARD_TYPE);
+          Serial.write(FLOW_READY);
           break;
         }
 

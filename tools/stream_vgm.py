@@ -75,12 +75,14 @@ DEFAULT_BAUD = 1000000
 BOARD_TYPE_UNO = 1
 BOARD_TYPE_MEGA = 2
 BOARD_TYPE_OTHER = 3
+BOARD_TYPE_TEENSY4 = 4
 
 # Board-specific settings: (chunk_size, chunks_in_flight, default_dac_rate)
 BOARD_SETTINGS = {
-    BOARD_TYPE_UNO: (64, 1, 4),    # Uno: 1 chunk at a time, DAC rate 1/4
-    BOARD_TYPE_MEGA: (128, 1, 4),  # Mega: 1 chunk at a time, DAC rate 1/4
-    BOARD_TYPE_OTHER: (128, 3, 1), # Default for other boards (full DAC)
+    BOARD_TYPE_UNO: (64, 1, 4),      # Uno: 1 chunk at a time, DAC rate 1/4
+    BOARD_TYPE_MEGA: (128, 1, 4),    # Mega: 1 chunk at a time, DAC rate 1/4
+    BOARD_TYPE_OTHER: (128, 1, 1),   # Other boards: 1 chunk, full DAC
+    BOARD_TYPE_TEENSY4: (128, 1, 1), # Teensy 4.x: 1 chunk, full DAC
 }
 
 CHUNK_HEADER = 0x01
@@ -522,7 +524,7 @@ def stream_vgm(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=Non
                     board_type = b
                 elif b == FLOW_READY and got_ack and board_type is not None:
                     got_ready = True
-                    board_name = {1: "Uno", 2: "Mega", 3: "Other"}.get(board_type, "Unknown")
+                    board_name = {1: "Uno", 2: "Mega", 3: "Other", 4: "Teensy 4.x"}.get(board_type, "Unknown")
                     print(f"  Arduino ready! (Board: {board_name})")
                     break
             time.sleep(0.01)

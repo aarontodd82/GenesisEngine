@@ -74,6 +74,9 @@ void GenesisBoard::begin() {
   // Initialize fast GPIO for control pins
   initFastGPIO();
 
+  // Give chips time to stabilize after power-on before reset
+  delay(50);
+
   // Reset both chips
   reset();
 
@@ -86,9 +89,9 @@ void GenesisBoard::begin() {
 void GenesisBoard::reset() {
   // Reset YM2612 (hold IC low for at least 24 clock cycles)
   digitalWrite(pinIC_Y_, LOW);
-  delayMicroseconds(100);  // ~768 cycles at 7.67MHz, plenty of margin
+  delayMicroseconds(500);  // Extended reset pulse for reliability
   digitalWrite(pinIC_Y_, HIGH);
-  delayMicroseconds(100);  // Wait for chip to stabilize
+  delayMicroseconds(500);  // Wait for chip to stabilize
 
   // Silence PSG
   silencePSG();
@@ -132,12 +135,16 @@ void GenesisBoard::writeYM2612(uint8_t port, uint8_t reg, uint8_t val) {
 
   *portClearA0_Y_ = maskA0_Y_;
   shiftOut8(reg);
+  delayMicroseconds(4);  // Data setup time before WR
   *portClearWR_Y_ = maskWR_Y_;
+  delayNanoseconds(200);  // YM2612 needs minimum WR pulse width
   *portSetWR_Y_ = maskWR_Y_;
 
   *portSetA0_Y_ = maskA0_Y_;
   shiftOut8(val);
+  delayMicroseconds(4);  // Data setup time before WR
   *portClearWR_Y_ = maskWR_Y_;
+  delayNanoseconds(200);
   *portSetWR_Y_ = maskWR_Y_;
   lastWriteTime_ = micros();
 
@@ -147,12 +154,16 @@ void GenesisBoard::writeYM2612(uint8_t port, uint8_t reg, uint8_t val) {
 
   GPIO.out_w1tc = (1 << pinA0_Y_cached_);
   shiftOut8(reg);
+  delayMicroseconds(4);  // Data setup time before WR
   GPIO.out_w1tc = (1 << pinWR_Y_cached_);
+  delayNanoseconds(200);  // YM2612 needs minimum WR pulse width
   GPIO.out_w1ts = (1 << pinWR_Y_cached_);
 
   GPIO.out_w1ts = (1 << pinA0_Y_cached_);
   shiftOut8(val);
+  delayMicroseconds(4);  // Data setup time before WR
   GPIO.out_w1tc = (1 << pinWR_Y_cached_);
+  delayNanoseconds(200);
   GPIO.out_w1ts = (1 << pinWR_Y_cached_);
   lastWriteTime_ = micros();
 
@@ -190,7 +201,9 @@ void GenesisBoard::beginDACStream() {
   *portClearA1_Y_ = maskA1_Y_;
   *portClearA0_Y_ = maskA0_Y_;
   shiftOut8(YM2612_DAC_DATA);
+  delayNanoseconds(100);  // Data setup time before WR
   *portClearWR_Y_ = maskWR_Y_;
+  delayNanoseconds(200);  // YM2612 needs minimum WR pulse width
   *portSetWR_Y_ = maskWR_Y_;
   *portSetA0_Y_ = maskA0_Y_;
 
@@ -198,7 +211,9 @@ void GenesisBoard::beginDACStream() {
   GPIO.out_w1tc = (1 << pinA1_Y_cached_);
   GPIO.out_w1tc = (1 << pinA0_Y_cached_);
   shiftOut8(YM2612_DAC_DATA);
+  delayNanoseconds(100);  // Data setup time before WR
   GPIO.out_w1tc = (1 << pinWR_Y_cached_);
+  delayNanoseconds(200);  // YM2612 needs minimum WR pulse width
   GPIO.out_w1ts = (1 << pinWR_Y_cached_);
   GPIO.out_w1ts = (1 << pinA0_Y_cached_);
 
@@ -245,14 +260,18 @@ void GenesisBoard::writeDAC(uint8_t sample) {
 #elif defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3)
   waitIfNeeded(YM_BUSY_US);
   shiftOut8(sample);
+  delayNanoseconds(100);  // Data setup time before WR
   *portClearWR_Y_ = maskWR_Y_;
+  delayNanoseconds(200);  // YM2612 needs minimum WR pulse width
   *portSetWR_Y_ = maskWR_Y_;
   lastWriteTime_ = micros();
 
 #elif defined(PLATFORM_ESP32)
   waitIfNeeded(YM_BUSY_US);
   shiftOut8(sample);
+  delayNanoseconds(100);  // Data setup time before WR
   GPIO.out_w1tc = (1 << pinWR_Y_cached_);
+  delayNanoseconds(200);  // YM2612 needs minimum WR pulse width
   GPIO.out_w1ts = (1 << pinWR_Y_cached_);
   lastWriteTime_ = micros();
 
