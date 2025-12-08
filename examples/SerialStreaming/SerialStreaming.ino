@@ -20,7 +20,7 @@
 // Configuration - Auto-detect board capabilities
 // =============================================================================
 
-#define SERIAL_BAUD 500000
+#define SERIAL_BAUD 1000000
 
 // Ring buffer size - maximize for each board
 // MUST be power of 2 for fast bitmask operations!
@@ -39,7 +39,7 @@
   #define BUFFER_MASK 0x7FF  // BUFFER_SIZE - 1
   #define CHUNK_SIZE 128
   #define BUFFER_FILL_BEFORE_PLAY 1536  // 75% full before starting
-  #define CHUNKS_IN_FLIGHT 3
+  #define CHUNKS_IN_FLIGHT 1  // Match Uno for testing
   #define BOARD_TYPE 2  // Mega
 #else
   // Other boards (Teensy, etc)

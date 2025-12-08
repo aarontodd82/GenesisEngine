@@ -69,18 +69,18 @@ FRAME_SAMPLES_PAL = 882
 # Configuration
 # =============================================================================
 
-DEFAULT_BAUD = 500000
+DEFAULT_BAUD = 1000000
 
 # Board types
 BOARD_TYPE_UNO = 1
 BOARD_TYPE_MEGA = 2
 BOARD_TYPE_OTHER = 3
 
-# Board-specific settings: (chunk_size, chunks_in_flight)
+# Board-specific settings: (chunk_size, chunks_in_flight, default_dac_rate)
 BOARD_SETTINGS = {
-    BOARD_TYPE_UNO: (64, 1),    # Uno: test with 1 chunk at a time
-    BOARD_TYPE_MEGA: (128, 3),  # Mega: larger buffer
-    BOARD_TYPE_OTHER: (128, 3), # Default for other boards
+    BOARD_TYPE_UNO: (64, 1, 4),    # Uno: 1 chunk at a time, DAC rate 1/4
+    BOARD_TYPE_MEGA: (128, 1, 4),  # Mega: 1 chunk at a time, DAC rate 1/4
+    BOARD_TYPE_OTHER: (128, 3, 1), # Default for other boards (full DAC)
 }
 
 CHUNK_HEADER = 0x01
@@ -446,10 +446,11 @@ def commands_to_bytes(commands, loop_index=None):
 # Streaming
 # =============================================================================
 
-def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, verbose=False):
+def stream_vgm(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=None, verbose=False):
     """Stream VGM file using binary protocol.
 
     Args:
+        dac_rate: None = use board default, 1-4 = override with specific rate
         loop_count: None = no looping, 0 = infinite, N = play N times total
     """
 
@@ -478,31 +479,11 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
     elif loop_count is not None:
         print(f"  No VGM loop point (will restart from beginning)")
 
-    # Preprocess VGM
+    # Preprocess VGM (DAC processing deferred until we know board type)
     print("  Preprocessing VGM...")
     commands, loop_index = preprocess_vgm(data, header['data_offset'], header['loop_offset'])
     original_cmd_count = len(commands)
     original_bytes = sum(1 + len(args) for cmd, args in commands)
-
-    # Apply DAC processing
-    if no_dac:
-        commands, loop_index = strip_dac(commands, loop_index)
-        print(f"  DAC stripped (FM/PSG only)")
-    elif dac_rate > 1:
-        commands, loop_index = apply_dac_rate_reduction(commands, dac_rate, loop_index)
-        print(f"  DAC rate reduction: 1/{dac_rate} (keeping every {dac_rate}th sample)")
-
-    # Apply wait optimization (merges and RLE)
-    commands, loop_index = apply_wait_optimization(commands, loop_index)
-    print(f"  Wait optimization: {original_cmd_count} -> {len(commands)} commands")
-
-    # Convert to bytes
-    stream_data, loop_byte_offset = commands_to_bytes(commands, loop_index)
-    compression_ratio = len(stream_data) / original_bytes * 100 if original_bytes > 0 else 100
-    print(f"  Stream size: {len(stream_data):,} bytes ({compression_ratio:.1f}% of original)")
-
-    if loop_byte_offset is not None:
-        print(f"  Loop byte offset: {loop_byte_offset:,}")
 
     # Connect
     print(f"\nConnecting to {port} at {baud} baud...")
@@ -557,7 +538,28 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
         return False
 
     # Get board-specific settings
-    chunk_size, chunks_in_flight = BOARD_SETTINGS.get(board_type, (64, 2))
+    chunk_size, chunks_in_flight, default_dac_rate = BOARD_SETTINGS.get(board_type, (64, 2, 1))
+
+    # Apply DAC processing (now that we know board type)
+    effective_dac_rate = dac_rate if dac_rate is not None else default_dac_rate
+    if no_dac:
+        commands, loop_index = strip_dac(commands, loop_index)
+        print(f"  DAC stripped (FM/PSG only)")
+    elif effective_dac_rate > 1:
+        commands, loop_index = apply_dac_rate_reduction(commands, effective_dac_rate, loop_index)
+        print(f"  DAC rate reduction: 1/{effective_dac_rate} (keeping every {effective_dac_rate}th sample)")
+
+    # Apply wait optimization (merges and RLE)
+    commands, loop_index = apply_wait_optimization(commands, loop_index)
+    print(f"  Wait optimization: {original_cmd_count} -> {len(commands)} commands")
+
+    # Convert to bytes
+    stream_data, loop_byte_offset = commands_to_bytes(commands, loop_index)
+    compression_ratio = len(stream_data) / original_bytes * 100 if original_bytes > 0 else 100
+    print(f"  Stream size: {len(stream_data):,} bytes ({compression_ratio:.1f}% of original)")
+
+    if loop_byte_offset is not None:
+        print(f"  Loop byte offset: {loop_byte_offset:,}")
 
     ser.reset_input_buffer()
 
@@ -582,12 +584,14 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
         packet = bytes([CHUNK_HEADER, length]) + data + bytes([checksum & 0xFF])
         ser.write(packet)
 
+    all_bytes_received = {}  # Debug: track ALL bytes
     def check_responses():
         """Check for READY/NAK signals. Returns (acks, naks) count."""
         acks = 0
         naks = 0
         while ser.in_waiting:
             b = ser.read(1)[0]
+            all_bytes_received[b] = all_bytes_received.get(b, 0) + 1
             if b == FLOW_READY:
                 acks += 1
             elif b == FLOW_NAK:
@@ -677,8 +681,8 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
             if acks > 0:
                 pending_chunks = pending_chunks[acks:]
 
-            # If pipeline full or done sending, wait for responses
-            if pending_chunks and (len(pending_chunks) >= chunks_in_flight or pos >= len(current_data)):
+            # If pipeline full or done sending or can't send, wait for responses
+            if pending_chunks and len(pending_chunks) >= chunks_in_flight:
                 acks, naks = wait_for_response(0.1)
                 if naks > 0:
                     retransmits += naks
@@ -718,8 +722,11 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
                             break
                         continue  # Keep waiting for ACKs
 
-                    # Start next loop iteration immediately
-                    # Don't wait for pending_chunks - just keep streaming
+                    # Wait for pending chunks to drain before switching
+                    if pending_chunks:
+                        continue  # Keep waiting for ACKs
+
+                    # Start next loop iteration
                     total_bytes_streamed += len(current_data)
                     loop_number += 1
                     pos = 0
@@ -751,6 +758,7 @@ def stream_vgm(port, baud, vgm_path, dac_rate=1, no_dac=False, loop_count=None, 
         print(f"\nStats:")
         print(f"  Total bytes streamed: {total_bytes_streamed:,}")
         print(f"  Chunks sent: {chunks_sent}, NAKs: {retransmits} ({retransmits*100//max(chunks_sent,1)}%)")
+        print(f"  All bytes received: {dict(sorted([(hex(k), v) for k, v in all_bytes_received.items()]))}")
         if is_looping:
             print(f"  Loops: {loop_number}")
         print(f"  Time: {elapsed:.1f}s")
@@ -783,8 +791,8 @@ Examples:
     python stream_vgm.py song.vgm --loop 3       # Loop 3 times
 
 DAC Options (for songs with PCM/DAC audio):
-    --dac-rate 2   Skip every other DAC sample (halves commands)
-    --dac-rate 4   Keep 1 in 4 DAC samples (quarters commands)
+    --dac-rate N   DAC sample rate divisor (1=full, 2=half, 3=third, 4=quarter)
+                   Default: 4 for Uno/Mega, 1 for faster boards
     --no-dac       Strip all DAC data (FM/PSG only)
 
 Looping:
@@ -799,8 +807,8 @@ Looping:
                         help=f'Baud rate (default: {DEFAULT_BAUD})')
     parser.add_argument('--list-ports', '-l', action='store_true',
                         help='List available serial ports')
-    parser.add_argument('--dac-rate', type=int, default=1, choices=[1, 2, 4],
-                        help='DAC sample rate divisor (1=full, 2=half, 4=quarter)')
+    parser.add_argument('--dac-rate', type=int, default=None, choices=[1, 2, 3, 4],
+                        help='DAC sample rate divisor (1=full, 2=half, 4=quarter). Default: auto per board')
     parser.add_argument('--no-dac', action='store_true',
                         help='Strip all DAC/PCM data (FM/PSG only, smallest size)')
     parser.add_argument('--loop', nargs='?', const=0, type=int, default=None, metavar='N',
@@ -818,7 +826,7 @@ Looping:
         print("Usage: python stream_vgm.py <file.vgm> [options]")
         print("\nOptions:")
         print("  --port PORT      Serial port")
-        print("  --baud BAUD      Baud rate (default: 500000)")
+        print("  --baud BAUD      Baud rate (default: 1000000)")
         print("  --dac-rate N     DAC sample rate divisor (1, 2, or 4)")
         print("  --no-dac         Strip all DAC data (FM/PSG only)")
         print("  --loop [N]       Loop forever (--loop) or N times (--loop 3)")
