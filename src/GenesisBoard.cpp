@@ -1,8 +1,13 @@
 #include "GenesisBoard.h"
+#include <SPI.h>
 
 #if defined(PLATFORM_ESP32)
 #include "soc/gpio_struct.h"
 #endif
+
+// Use hardware SPI for shift register (much faster than bit-banging)
+// Set to 0 to use software bit-banging on custom pins
+#define USE_HARDWARE_SPI 1
 
 // =============================================================================
 // YM2612 Register Definitions
@@ -38,14 +43,12 @@ GenesisBoard::GenesisBoard(
 // Initialization
 // =============================================================================
 void GenesisBoard::begin() {
-  // Configure all pins as outputs
+  // Configure control pins as outputs
   pinMode(pinWR_P_, OUTPUT);
   pinMode(pinWR_Y_, OUTPUT);
   pinMode(pinIC_Y_, OUTPUT);
   pinMode(pinA0_Y_, OUTPUT);
   pinMode(pinA1_Y_, OUTPUT);
-  pinMode(pinSCK_, OUTPUT);
-  pinMode(pinSDI_, OUTPUT);
 
   // Set initial states (active-low signals start HIGH)
   digitalWrite(pinWR_P_, HIGH);
@@ -53,10 +56,22 @@ void GenesisBoard::begin() {
   digitalWrite(pinIC_Y_, HIGH);  // Not in reset
   digitalWrite(pinA0_Y_, LOW);
   digitalWrite(pinA1_Y_, LOW);
+
+#if USE_HARDWARE_SPI
+  // Use hardware SPI for shift register - MUCH faster
+  // Mega: MOSI=51, SCK=52. Uno: MOSI=11, SCK=13
+  SPI.begin();
+  // 8MHz SPI clock - fast but within CD74HCT164E specs
+  SPI.beginTransaction(SPISettings(8000000, MSBFIRST, SPI_MODE0));
+#else
+  // Software bit-bang on custom pins
+  pinMode(pinSCK_, OUTPUT);
+  pinMode(pinSDI_, OUTPUT);
   digitalWrite(pinSCK_, LOW);
   digitalWrite(pinSDI_, LOW);
+#endif
 
-  // Initialize fast GPIO for shift register
+  // Initialize fast GPIO for control pins
   initFastGPIO();
 
   // Reset both chips
@@ -92,9 +107,8 @@ void GenesisBoard::writeYM2612(uint8_t port, uint8_t reg, uint8_t val) {
     endDACStream();
   }
 
-  waitIfNeeded(YM_BUSY_US);
-
 #if defined(PLATFORM_AVR)
+  // AVR: GPIO is slow enough, no need for busy wait or time tracking
   // Set port select (A1)
   if (port) *portA1_Y_ |= maskA1_Y_; else *portA1_Y_ &= ~maskA1_Y_;
 
@@ -113,6 +127,7 @@ void GenesisBoard::writeYM2612(uint8_t port, uint8_t reg, uint8_t val) {
   *portWR_Y_ |= maskWR_Y_;
 
 #elif defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3)
+  waitIfNeeded(YM_BUSY_US);
   if (port) *portSetA1_Y_ = maskA1_Y_; else *portClearA1_Y_ = maskA1_Y_;
 
   *portClearA0_Y_ = maskA0_Y_;
@@ -124,8 +139,10 @@ void GenesisBoard::writeYM2612(uint8_t port, uint8_t reg, uint8_t val) {
   shiftOut8(val);
   *portClearWR_Y_ = maskWR_Y_;
   *portSetWR_Y_ = maskWR_Y_;
+  lastWriteTime_ = micros();
 
 #elif defined(PLATFORM_ESP32)
+  waitIfNeeded(YM_BUSY_US);
   if (port) GPIO.out_w1ts = (1 << pinA1_Y_cached_); else GPIO.out_w1tc = (1 << pinA1_Y_cached_);
 
   GPIO.out_w1tc = (1 << pinA0_Y_cached_);
@@ -137,8 +154,10 @@ void GenesisBoard::writeYM2612(uint8_t port, uint8_t reg, uint8_t val) {
   shiftOut8(val);
   GPIO.out_w1tc = (1 << pinWR_Y_cached_);
   GPIO.out_w1ts = (1 << pinWR_Y_cached_);
+  lastWriteTime_ = micros();
 
 #else
+  waitIfNeeded(YM_BUSY_US);
   digitalWrite(pinA1_Y_, port ? HIGH : LOW);
   digitalWrite(pinA0_Y_, LOW);
   shiftOut8(reg);
@@ -146,9 +165,8 @@ void GenesisBoard::writeYM2612(uint8_t port, uint8_t reg, uint8_t val) {
   digitalWrite(pinA0_Y_, HIGH);
   shiftOut8(val);
   pulseLow(pinWR_Y_);
-#endif
-
   lastWriteTime_ = micros();
+#endif
 }
 
 void GenesisBoard::setDACEnabled(bool enabled) {
@@ -217,25 +235,33 @@ void GenesisBoard::writeDAC(uint8_t sample) {
     beginDACStream();
   }
 
-  waitIfNeeded(YM_BUSY_US);
-
+#if defined(PLATFORM_AVR)
+  // AVR: GPIO is slow enough, no need for busy wait or time tracking
   // In streaming mode, just shift out data and pulse WR
   shiftOut8(sample);
-
-#if defined(PLATFORM_AVR)
   *portWR_Y_ &= ~maskWR_Y_;
   *portWR_Y_ |= maskWR_Y_;
+
 #elif defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3)
+  waitIfNeeded(YM_BUSY_US);
+  shiftOut8(sample);
   *portClearWR_Y_ = maskWR_Y_;
   *portSetWR_Y_ = maskWR_Y_;
+  lastWriteTime_ = micros();
+
 #elif defined(PLATFORM_ESP32)
+  waitIfNeeded(YM_BUSY_US);
+  shiftOut8(sample);
   GPIO.out_w1tc = (1 << pinWR_Y_cached_);
   GPIO.out_w1ts = (1 << pinWR_Y_cached_);
-#else
-  pulseLow(pinWR_Y_);
-#endif
-
   lastWriteTime_ = micros();
+
+#else
+  waitIfNeeded(YM_BUSY_US);
+  shiftOut8(sample);
+  pulseLow(pinWR_Y_);
+  lastWriteTime_ = micros();
+#endif
 }
 
 // =============================================================================
@@ -365,7 +391,11 @@ void GenesisBoard::initFastGPIO() {
 // Optimized Shift Out - Platform Specific
 // -----------------------------------------------------------------------------
 void GenesisBoard::shiftOut8(uint8_t data) {
-#if defined(PLATFORM_AVR)
+#if USE_HARDWARE_SPI
+  // Hardware SPI - blazing fast (~1µs per byte at 8MHz)
+  SPI.transfer(data);
+
+#elif defined(PLATFORM_AVR)
   // AVR: Direct port manipulation (~20x faster than digitalWrite)
   // Unrolled loop for maximum speed
   uint8_t oldSREG = SREG;

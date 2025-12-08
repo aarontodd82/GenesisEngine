@@ -58,12 +58,26 @@
 // =============================================================================
 // Pin Configuration
 // =============================================================================
-
+// Control pins - directly connected to chips
 const uint8_t PIN_WR_P = 2;
 const uint8_t PIN_WR_Y = 3;
 const uint8_t PIN_IC_Y = 4;
 const uint8_t PIN_A0_Y = 5;
 const uint8_t PIN_A1_Y = 6;
+
+// Shift register pins - directly connected OR use hardware SPI
+// If USE_HARDWARE_SPI is enabled in GenesisBoard.cpp, these are IGNORED
+// and you MUST use the hardware SPI pins instead:
+//
+//   Board        MOSI (SDI)    SCK
+//   ----------   ----------    ---
+//   Uno          11            13
+//   Mega         51            52
+//   Teensy 4.x   11            13
+//   Teensy 3.x   11            13
+//   ESP32        23            18
+//
+// If USE_HARDWARE_SPI is disabled, these custom pins are used:
 const uint8_t PIN_SCK  = 7;
 const uint8_t PIN_SDI  = 8;
 
@@ -76,9 +90,8 @@ volatile uint16_t bufferHead = 0;
 volatile uint16_t bufferTail = 0;
 
 inline uint16_t bufferAvailable() {
-  int16_t diff = bufferHead - bufferTail;
-  if (diff < 0) diff += BUFFER_SIZE;
-  return (uint16_t)diff;
+  // Branchless version using bitmask (works because BUFFER_SIZE is power of 2)
+  return (bufferHead - bufferTail) & BUFFER_MASK;
 }
 
 inline uint16_t bufferFree() {
@@ -324,20 +337,21 @@ int32_t processCommand() {
     bufferRead();
     bufferRead();
 
-    // Process DPCM data
-    for (uint8_t i = 0; i < len; i++) {
+    // Process DPCM data - optimized inner loop
+    // Each byte contains two 4-bit deltas (high nibble first)
+    uint8_t sample = lastDacSample;
+    while (len--) {
       uint8_t packed = bufferRead();
 
       // High nibble: first delta (-8 to +7)
-      int8_t delta1 = (int8_t)((packed >> 4) & 0x0F) - 8;
-      lastDacSample += delta1;
-      board.writeDAC(lastDacSample);
+      sample += (int8_t)((packed >> 4) & 0x0F) - 8;
+      board.writeDAC(sample);
 
-      // Low nibble: second delta (-8 to +7)
-      int8_t delta2 = (int8_t)(packed & 0x0F) - 8;
-      lastDacSample += delta2;
-      board.writeDAC(lastDacSample);
+      // Low nibble: second delta
+      sample += (int8_t)(packed & 0x0F) - 8;
+      board.writeDAC(sample);
     }
+    lastDacSample = sample;
     return 0;
   }
 
@@ -458,14 +472,17 @@ void updatePlayback() {
 
     if (result > 0) {
       // Wait command: schedule next command
-      uint32_t waitUs = ((uint32_t)result * 10000UL) / 441UL;
+      // Convert samples to microseconds: samples * 1000000 / 44100
+      // Approximation: samples * 23 ≈ samples * 22.676 (error < 1.5%)
+      // This avoids expensive division on AVR
+      uint32_t waitUs = (uint32_t)result * 23UL;
       nextCommandTime = now + waitUs;
       return;  // Exit and let loop() call receiveData()
     }
 
     // result == 0: chip write, continue processing
-    // But check serial every few commands to prevent overflow
-    if (++cmdCount >= 4) {
+    // Check serial periodically to prevent overflow (256-byte buffer)
+    if (++cmdCount >= 8) {
       receiveData();
       cmdCount = 0;
     }
