@@ -20,7 +20,7 @@
 // Configuration - Auto-detect board capabilities
 // =============================================================================
 
-#define SERIAL_BAUD 250000
+#define SERIAL_BAUD 230400
 
 // Ring buffer size - maximize for each board
 // Uno has 2KB RAM, Mega has 8KB RAM
@@ -206,15 +206,23 @@ void receiveData() {
         rxState = RX_HAVE_LENGTH;
         break;
 
-      case RX_HAVE_LENGTH:
-        // Reading data bytes
+      case RX_HAVE_LENGTH: {
+        // Reading data bytes - grab as many as available
         rxTempBuf[rxCount++] = b;
         rxChecksum ^= b;
+
+        // Bulk read remaining bytes if available
+        while (rxCount < rxLength && Serial.available() > 0) {
+          uint8_t d = Serial.read();
+          rxTempBuf[rxCount++] = d;
+          rxChecksum ^= d;
+        }
 
         if (rxCount >= rxLength) {
           rxState = RX_READING_DATA;  // Next byte is checksum
         }
         break;
+      }
 
       case RX_READING_DATA:
         // This byte is the checksum
