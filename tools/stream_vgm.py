@@ -73,7 +73,7 @@ FRAME_SAMPLES_PAL = 882
 # Configuration
 # =============================================================================
 
-DEFAULT_BAUD = 230400
+DEFAULT_BAUD = 500000
 
 # Chunk sizes per board type (sent during handshake)
 CHUNK_SIZE_UNO = 64

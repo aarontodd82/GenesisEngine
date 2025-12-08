@@ -20,7 +20,7 @@
 // Configuration - Auto-detect board capabilities
 // =============================================================================
 
-#define SERIAL_BAUD 230400
+#define SERIAL_BAUD 500000
 
 // Ring buffer size - maximize for each board
 // MUST be power of 2 for fast bitmask operations!
@@ -474,15 +474,25 @@ void updatePlayback() {
       // Wait command: schedule next command
       // Convert samples to microseconds: samples * 1000000 / 44100
       // Approximation: samples * 23 ≈ samples * 22.676 (error < 1.5%)
-      // This avoids expensive division on AVR
       uint32_t waitUs = (uint32_t)result * 23UL;
-      nextCommandTime = now + waitUs;
+
+      // Smart catch-up: add wait to scheduled time, not current time
+      // This prevents accumulating drift. If we're behind, we stay behind
+      // but don't fall further behind.
+      nextCommandTime += waitUs;
+
+      // If we're behind at all, snap to now (don't try to catch up)
+      if ((int32_t)(now - nextCommandTime) > 0) {
+        nextCommandTime = now;
+      }
+
       return;  // Exit and let loop() call receiveData()
     }
 
     // result == 0: chip write, continue processing
     // Check serial periodically to prevent overflow (256-byte buffer)
-    if (++cmdCount >= 8) {
+    // At 500kbaud, buffer fills ~50 bytes/ms, so check every 16 commands
+    if (++cmdCount >= 16) {
       receiveData();
       cmdCount = 0;
     }
