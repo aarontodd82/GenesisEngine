@@ -426,6 +426,73 @@ def apply_dac_rate_reduction(commands, dac_rate=1, loop_index=None):
     return compressed, new_loop_index
 
 
+def detect_chips(commands):
+    """Detect which chips are used in the command stream.
+
+    Returns: (has_psg, has_ym2612)
+    """
+    has_psg = False
+    has_ym2612 = False
+
+    for cmd, args in commands:
+        if cmd == CMD_PSG_WRITE:
+            has_psg = True
+        elif cmd in (CMD_YM2612_WRITE_A0, CMD_YM2612_WRITE_A1):
+            has_ym2612 = True
+        # Also check DAC commands (0x80-0x8F) as YM2612
+        elif 0x80 <= cmd <= 0x8F:
+            has_ym2612 = True
+
+        if has_psg and has_ym2612:
+            break  # Found both, no need to continue
+
+    return has_psg, has_ym2612
+
+
+def attenuate_psg(commands, attenuation_increase=1, loop_index=None):
+    """Increase PSG attenuation (reduce volume) by specified amount.
+
+    PSG attenuation commands have format: 1cc1aaaa
+      - cc = channel (0-3)
+      - aaaa = attenuation (0=loudest, 15=silent)
+
+    Args:
+        commands: List of (cmd, args) tuples
+        attenuation_increase: How much to increase attenuation (1-15)
+        loop_index: Index of loop point in commands
+
+    Returns: (modified_commands, new_loop_index)
+    """
+    modified = []
+    new_loop_index = None
+
+    for i, (cmd, args) in enumerate(commands):
+        if loop_index is not None and i == loop_index:
+            new_loop_index = len(modified)
+
+        if cmd == CMD_PSG_WRITE and args:
+            psg_byte = args[0]
+            # Check if this is an attenuation command (bit 4 set, bit 7 set)
+            if (psg_byte & 0x90) == 0x90:
+                # Extract current attenuation (bits 0-3)
+                current_atten = psg_byte & 0x0F
+                # If already silent (15), leave it silent
+                # Otherwise increase attenuation but cap at 14 to preserve audibility
+                if current_atten == 15:
+                    new_atten = 15
+                else:
+                    new_atten = min(14, current_atten + attenuation_increase)
+                # Rebuild the byte
+                new_byte = (psg_byte & 0xF0) | new_atten
+                modified.append((cmd, bytes([new_byte])))
+            else:
+                modified.append((cmd, args))
+        else:
+            modified.append((cmd, args))
+
+    return modified, new_loop_index
+
+
 def commands_to_bytes(commands, loop_index=None):
     """Convert command list to raw bytes.
 
@@ -541,6 +608,12 @@ def stream_vgm(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=Non
 
     # Get board-specific settings
     chunk_size, chunks_in_flight, default_dac_rate = BOARD_SETTINGS.get(board_type, (64, 2, 1))
+
+    # Detect chips and apply PSG attenuation if both FM and PSG are present
+    has_psg, has_ym2612 = detect_chips(commands)
+    if has_psg and has_ym2612:
+        commands, loop_index = attenuate_psg(commands, attenuation_increase=2, loop_index=loop_index)
+        print(f"  PSG attenuated for FM+PSG mix")
 
     # Apply DAC processing (now that we know board type)
     effective_dac_rate = dac_rate if dac_rate is not None else default_dac_rate
