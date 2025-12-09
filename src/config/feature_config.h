@@ -133,4 +133,27 @@
   #define GENESIS_DEBUG_PRINTF(...)
 #endif
 
+// =============================================================================
+// Testing / Simulation Settings
+// Use these to test memory-constrained behavior on larger boards
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// Simulated Memory Limit for PCM Data Bank
+// Set to simulate Uno/Mega memory constraints on Teensy for testing
+// The PCMDataBank will pretend this is the max available RAM
+// Examples:
+//   #define PCM_SIMULATE_MAX_RAM 1500    // Uno-like (~1.5KB free)
+//   #define PCM_SIMULATE_MAX_RAM 6000    // Mega-like (~6KB free)
+//   #define PCM_SIMULATE_MAX_RAM 0       // Simulate zero RAM (DAC disabled)
+// Comment out or leave undefined for normal operation
+// -----------------------------------------------------------------------------
+// #define PCM_SIMULATE_MAX_RAM 6000
+
+// -----------------------------------------------------------------------------
+// Disable PSRAM for testing
+// Forces RAM-only allocation even on Teensy 4.1 with PSRAM
+// -----------------------------------------------------------------------------
+// #define PCM_DISABLE_PSRAM
+
 #endif // GENESIS_ENGINE_FEATURE_CONFIG_H

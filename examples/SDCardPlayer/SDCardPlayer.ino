@@ -32,9 +32,16 @@
  *   help              Show command list
  *
  * Platform Notes:
- *   - Arduino Uno/Mega: Only .vgm files supported (not .vgz)
- *     Use vgm_prep.py to decompress and optimize files
- *   - Teensy/ESP32: Full .vgm and .vgz support
+ *   - Teensy/ESP32: Full .vgm and .vgz support with PCM/DAC playback
+ *   - Arduino Uno/Mega: Only .vgm files supported (not .vgz), limited RAM
+ *     for PCM data. Use tools/vgm_prep.py to prepare files:
+ *
+ *       python vgm_prep.py song.vgz -o song.vgm
+ *
+ *     This tool decompresses VGZ, inlines DAC samples, and reduces DAC
+ *     sample rate to 1/4 (suitable for Uno/Mega). The output file plays
+ *     without needing RAM for PCM storage. For full quality on faster
+ *     boards, use --dac-rate 1.
  */
 
 #include <GenesisEngine.h>

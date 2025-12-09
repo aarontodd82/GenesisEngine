@@ -85,6 +85,7 @@ private:
   uint32_t originalSize_;   // Original size before downsampling
   uint32_t position_;       // Current read position (in stored data)
   uint8_t downsampleRatio_; // 1, 2, or 4
+  uint8_t readCount_;       // Counter for repeating samples when downsampled
   bool usingPSRAM_;         // True if allocated from PSRAM
   bool dacDisabled_;        // True if allocation failed
 

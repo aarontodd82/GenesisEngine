@@ -1,4 +1,5 @@
 #include "PCMDataBank.h"
+#include "config/feature_config.h"
 
 // =============================================================================
 // Free Memory Detection (cross-platform)
@@ -17,9 +18,10 @@ extern char *__malloc_heap_start;
 // PSRAM Support (Teensy 4.1)
 // =============================================================================
 
-#if defined(PLATFORM_TEENSY4)
+#if defined(PLATFORM_TEENSY4) && !defined(PCM_DISABLE_PSRAM)
 extern "C" void* extmem_malloc(size_t size);
 extern "C" void extmem_free(void* ptr);
+#define PCM_USE_PSRAM 1
 #endif
 
 int PCMDataBank::getFreeMemory() {
@@ -44,6 +46,7 @@ PCMDataBank::PCMDataBank()
   , originalSize_(0)
   , position_(0)
   , downsampleRatio_(1)
+  , readCount_(0)
   , usingPSRAM_(false)
   , dacDisabled_(false)
 {
@@ -61,7 +64,7 @@ uint8_t* PCMDataBank::tryAllocate(uint32_t size, bool& isPSRAM) {
   isPSRAM = false;
 
   // Try PSRAM first (Teensy 4.1 with PSRAM chip)
-#if defined(PLATFORM_TEENSY4)
+#if defined(PCM_USE_PSRAM)
   // extmem_malloc returns nullptr if no PSRAM installed
   uint8_t* ptr = (uint8_t*)extmem_malloc(size);
   if (ptr) {
@@ -80,6 +83,17 @@ uint8_t* PCMDataBank::tryAllocate(uint32_t size, bool& isPSRAM) {
   // Fall back to regular RAM
   // Leave some headroom for stack and other allocations
   int freeRam = getFreeMemory();
+
+#if defined(PCM_SIMULATE_MAX_RAM)
+  // Simulate limited RAM for testing
+  Serial.print("PCM: [TEST MODE] Simulating max RAM: ");
+  Serial.print(PCM_SIMULATE_MAX_RAM);
+  Serial.print(" bytes (actual free: ");
+  Serial.print(freeRam);
+  Serial.println(")");
+  freeRam = PCM_SIMULATE_MAX_RAM;
+#endif
+
   int safeSize = freeRam - 1024;  // Keep 1KB for stack/other allocations
 
   if ((int)size > safeSize || safeSize < 0) {
@@ -156,6 +170,13 @@ bool PCMDataBank::loadDataBlock(uint32_t originalSize,
       Serial.print(" into ");
       Serial.println(usingPSRAM_ ? "PSRAM" : "RAM");
 
+      if (downsampleRatio_ > 1) {
+        Serial.println("PCM: TIP - For better quality, use vgm_prep.py:");
+        Serial.print("PCM:   python vgm_prep.py song.vgz --dac-rate ");
+        Serial.print(downsampleRatio_);
+        Serial.println(" -o song.vgm");
+      }
+
       return true;
     }
   }
@@ -175,13 +196,15 @@ bool PCMDataBank::loadDataBlock(uint32_t originalSize,
   Serial.print(getFreeMemory());
   Serial.println(" bytes");
   Serial.println("PCM: DAC playback disabled for this file");
+  Serial.println("PCM: TIP - Use vgm_prep.py to convert for low-memory playback:");
+  Serial.println("PCM:   python vgm_prep.py song.vgz --dac-rate 4 -o song.vgm");
 
   return false;
 }
 
 void PCMDataBank::clear() {
   if (dataBank_) {
-#if defined(PLATFORM_TEENSY4)
+#if defined(PCM_USE_PSRAM)
     if (usingPSRAM_) {
       extmem_free(dataBank_);
     } else {
@@ -198,6 +221,7 @@ void PCMDataBank::clear() {
   originalSize_ = 0;
   position_ = 0;
   downsampleRatio_ = 1;
+  readCount_ = 0;
   usingPSRAM_ = false;
   dacDisabled_ = false;
 }
@@ -211,7 +235,18 @@ uint8_t PCMDataBank::readByte() {
     return 0x80;  // Silence (center value for unsigned 8-bit audio)
   }
 
-  return dataBank_[position_++];
+  // When downsampled, we need to return the same sample multiple times
+  // to maintain correct timing. readCount_ tracks how many times we've
+  // returned the current sample.
+  uint8_t sample = dataBank_[position_];
+
+  readCount_++;
+  if (readCount_ >= downsampleRatio_) {
+    readCount_ = 0;
+    position_++;
+  }
+
+  return sample;
 }
 
 void PCMDataBank::seek(uint32_t position) {
@@ -223,6 +258,9 @@ void PCMDataBank::seek(uint32_t position) {
   } else {
     position_ = dataSize_;
   }
+
+  // Reset read counter - start fresh at new position
+  readCount_ = 0;
 }
 
 uint32_t PCMDataBank::getPosition() const {
