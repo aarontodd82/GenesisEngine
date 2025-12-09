@@ -141,11 +141,18 @@ bool streamEnded = false;
 // Stats
 uint32_t commandsProcessed = 0;
 
+// Timeout detection
+uint32_t lastDataTime = 0;
+#define DISCONNECT_TIMEOUT_MS 500
+
 // =============================================================================
 // Setup
 // =============================================================================
 
 void setup() {
+  // Initialize board FIRST - silence chips immediately on power-up
+  board.begin();
+
   Serial.begin(SERIAL_BAUD);
   while (!Serial) { }
 
@@ -154,8 +161,6 @@ void setup() {
   while (Serial.available()) {
     Serial.read();
   }
-
-  board.begin();
 
   // Wait for PING before signaling ready
   while (true) {
@@ -189,6 +194,7 @@ uint8_t chunksReceived = 0;  // Count chunks for pipelined ACK
 void receiveData() {
   while (Serial.available() > 0) {
     uint8_t b = Serial.read();
+    lastDataTime = millis();  // Track when we last received data
 
     switch (rxState) {
       case RX_IDLE:
@@ -494,6 +500,7 @@ void loop() {
       if (bufferAvailable() >= BUFFER_FILL_BEFORE_PLAY && !streamEnded) {
         state = PLAYING;
         nextCommandTime = micros();
+        lastDataTime = millis();  // Reset timeout when starting playback
       }
       break;
 
@@ -503,6 +510,12 @@ void loop() {
 
       // Check if stream ended
       if (streamEnded && bufferEmpty()) {
+        state = STOPPED;
+      }
+
+      // Check for disconnect timeout - silence chips if no data received
+      if (millis() - lastDataTime > DISCONNECT_TIMEOUT_MS) {
+        board.reset();  // Silence chips
         state = STOPPED;
       }
       break;
