@@ -77,8 +77,11 @@ If you need different pins for SCK/SDI, set `USE_HARDWARE_SPI` to 0 in `GenesisB
 #include <GenesisEngine.h>
 #include "music.h"  // Your VGM converted to a header file
 
-// Define your pin connections
-GenesisBoard board(WR_P, WR_Y, IC_Y, A0_Y, A1_Y, SCK, SDI);
+// Pin connections (directly configurable)
+const uint8_t WR_P = 2, WR_Y = 3, IC_Y = 4, A0_Y = 5, A1_Y = 6;
+
+// SCK/SDI ignored when using hardware SPI (default)
+GenesisBoard board(WR_P, WR_Y, IC_Y, A0_Y, A1_Y, 0, 0);
 GenesisEngine player(board);
 
 void setup() {
@@ -98,7 +101,8 @@ void loop() {
 #include <GenesisEngine.h>
 #include <SD.h>
 
-GenesisBoard board(WR_P, WR_Y, IC_Y, A0_Y, A1_Y, SCK, SDI);
+const uint8_t WR_P = 2, WR_Y = 3, IC_Y = 4, A0_Y = 5, A1_Y = 6;
+GenesisBoard board(WR_P, WR_Y, IC_Y, A0_Y, A1_Y, 0, 0);
 GenesisEngine player(board);
 
 void setup() {
