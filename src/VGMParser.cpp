@@ -12,6 +12,7 @@ VGMParser::VGMParser(GenesisBoard& board)
     loopSamples_(0),
     dataOffset_(0),
     loopOffset_(0),
+    loopOffsetInData_(0),
     hasLoop_(false),
     hasYM2612_(false),
     hasSN76489_(false),
@@ -88,6 +89,14 @@ bool VGMParser::parseHeader() {
     dataOffset_ = 0x40;
   }
 
+  // Calculate loop offset relative to data start (for seeking)
+  // This is used by VGZSource which tracks positions relative to data start
+  if (hasLoop_ && loopOffset_ >= dataOffset_) {
+    loopOffsetInData_ = loopOffset_ - dataOffset_;
+  } else {
+    loopOffsetInData_ = 0;
+  }
+
   // Check if this file is playable on our hardware
   if (!hasYM2612_ && !hasSN76489_) {
     GENESIS_DEBUG_PRINTLN("VGM has no supported chips");
@@ -161,7 +170,10 @@ bool VGMParser::seekToLoop() {
     return false;
   }
 
-  if (source_->seek(loopOffset_)) {
+  // Seek to relative position (offset from data start)
+  // This is compatible with both SDSource and VGZSource
+  // VGZSource tracks position relative to data start after setDataStart()
+  if (source_->seek(loopOffsetInData_)) {
     finished_ = false;
     return true;
   }

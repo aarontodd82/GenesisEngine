@@ -29,6 +29,12 @@ public:
   // Check if file is VGZ (compressed)
   bool isVGZ() const { return isVGZ_; }
 
+  // Set the data start offset (called after parsing VGM header)
+  // After this, seek positions are relative to data start
+  void setDataStart(uint32_t dataOffset) {
+    dataStartOffset_ = dataOffset;
+  }
+
   // -------------------------------------------------------------------------
   // VGMSource Interface
   // -------------------------------------------------------------------------
@@ -57,6 +63,7 @@ private:
   char filename_[64];  // Long filename support
 #endif
   uint32_t fileSize_;
+  uint32_t dataStartOffset_;  // Offset to VGM data start (for relative seeking)
   bool isOpen_;
   bool isVGZ_;
 

@@ -77,8 +77,8 @@ void GenesisEngine::stop() {
     return;
   }
 
-  // Mute all sound
-  board_.muteAll();
+  // Full hardware reset to clear any hanging notes
+  board_.reset();
 
   // Reset state
   parser_.reset();
@@ -177,8 +177,8 @@ void GenesisEngine::processCommands() {
       }
     }
 
-    // Playback finished
-    board_.muteAll();
+    // Playback finished - full reset to clear any hanging notes
+    board_.reset();
     state_ = GenesisEngineState::FINISHED;
     GENESIS_DEBUG_PRINTLN("Playback finished");
   }
@@ -219,17 +219,13 @@ bool GenesisEngine::playFile(const char* path) {
     bool success = startPlayback();
 
     // After parsing header, notify VGZSource that we've reached data start
-    // This resets currentDataPos_ to 0, matching how MIDI-Player works
+    // This resets currentDataPos_ to 0, so positions are relative to data start
     if (success) {
       vgzSource_.setDataStart();
 
-      // Set loop offset relative to data start
+      // Set loop offset relative to data start (VGMParser now calculates this)
       if (parser_.hasLoop()) {
-        uint32_t loopOffsetInFile = 0x1C + parser_.getLoopOffset();
-        uint32_t dataStart = parser_.getDataOffset();
-        if (loopOffsetInFile >= dataStart) {
-          vgzSource_.setLoopOffset(loopOffsetInFile - dataStart);
-        }
+        vgzSource_.setLoopOffset(parser_.getLoopOffsetInData());
       }
     }
 
@@ -258,6 +254,13 @@ bool GenesisEngine::playFile(const char* path) {
   }
 
   parser_.setSource(&sdSource_);
-  return startPlayback();
+  bool success = startPlayback();
+
+  // After parsing header, set data start offset so seek positions are relative
+  if (success) {
+    sdSource_.setDataStart(parser_.getDataOffset());
+  }
+
+  return success;
 }
 #endif // GENESIS_ENGINE_USE_SD

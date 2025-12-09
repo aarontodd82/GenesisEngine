@@ -9,6 +9,7 @@
 
 SDSource::SDSource()
   : fileSize_(0),
+    dataStartOffset_(0),
     isOpen_(false),
     isVGZ_(false)
 {
@@ -95,6 +96,7 @@ void SDSource::close() {
     file_.close();
     isOpen_ = false;
     fileSize_ = 0;
+    dataStartOffset_ = 0;
     filename_[0] = '\0';
     isVGZ_ = false;
   }
@@ -136,7 +138,10 @@ bool SDSource::seek(uint32_t pos) {
   if (!isOpen_) {
     return false;
   }
-  return file_.seek(pos);
+  // If dataStartOffset_ is set, seek positions are relative to data start
+  // Convert to absolute file position
+  uint32_t absolutePos = dataStartOffset_ + pos;
+  return file_.seek(absolutePos);
 }
 
 uint32_t SDSource::position() const {

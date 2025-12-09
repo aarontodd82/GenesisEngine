@@ -56,6 +56,7 @@ public:
   uint32_t getTotalSamples() const { return totalSamples_; }
   uint32_t getLoopSamples() const { return loopSamples_; }
   uint32_t getLoopOffset() const { return loopOffset_; }
+  uint32_t getLoopOffsetInData() const { return loopOffsetInData_; }
   uint32_t getDataOffset() const { return dataOffset_; }
   uint32_t getVersion() const { return version_; }
   bool hasYM2612() const { return hasYM2612_; }
@@ -87,7 +88,8 @@ private:
   uint32_t totalSamples_;
   uint32_t loopSamples_;
   uint32_t dataOffset_;
-  uint32_t loopOffset_;
+  uint32_t loopOffset_;        // Absolute loop position in file
+  uint32_t loopOffsetInData_;  // Loop position relative to data start (for seeking)
   bool hasLoop_;
   bool hasYM2612_;
   bool hasSN76489_;
