@@ -1,0 +1,23 @@
+# KiCad backup files
+*-backups/
+*~
+_autosave-*
+*.bak
+
+# Local preferences (user-specific)
+*.kicad_prl
+
+# Rescue libraries (auto-generated)
+*-rescue.kicad_sym
+*-rescue.lib
+
+# Legacy format backups
+*.sch-bak
+*.kicad_sch-bak
+*.kicad_pcb-bak
+
+# Cache files
+fp-info-cache
+
+# Zip archives
+*.zip

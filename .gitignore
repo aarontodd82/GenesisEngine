@@ -3,3 +3,14 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# Music files (binary, use vgm2header.py to convert)
+*.vgm
+*.vgz
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Windows artifacts
+nul

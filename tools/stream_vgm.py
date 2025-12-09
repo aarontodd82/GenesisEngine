@@ -17,6 +17,7 @@ Usage:
 """
 
 import argparse
+import glob
 import gzip
 import os
 import sys
@@ -849,6 +850,192 @@ def stream_vgm(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=Non
 
 
 # =============================================================================
+# Interactive Wizard
+# =============================================================================
+
+def interactive_wizard():
+    """Interactive mode for users who run without arguments."""
+    print("=" * 60)
+    print("  Genesis Engine VGM Streamer")
+    print("=" * 60)
+    print()
+
+    # Step 1: Find VGM files in current directory AND script directory
+    vgm_files = []
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    search_dirs = ['.']  # Current directory
+    if script_dir != os.path.abspath('.'):
+        search_dirs.append(script_dir)  # Script directory (if different)
+
+    for search_dir in search_dirs:
+        for ext in ['*.vgm', '*.vgz', '*.VGM', '*.VGZ']:
+            pattern = os.path.join(search_dir, ext)
+            vgm_files.extend(glob.glob(pattern))
+
+    # Remove duplicates and sort
+    vgm_files = sorted(set(os.path.normpath(f) for f in vgm_files))
+
+    if not vgm_files:
+        print("No VGM/VGZ files found.")
+        print()
+        print("Searched:")
+        print(f"  - Current directory: {os.path.abspath('.')}")
+        if len(search_dirs) > 1:
+            print(f"  - Script directory:  {script_dir}")
+        print()
+        print("Please either:")
+        print("  1. Copy some .vgm or .vgz files to one of these folders")
+        print("  2. Run with a file path: python stream_vgm.py path/to/song.vgm")
+        print()
+        input("Press Enter to exit...")
+        return 1
+
+    # Step 2: Select file
+    print(f"Found {len(vgm_files)} VGM file(s):")
+    print()
+    for i, f in enumerate(vgm_files, 1):
+        # Get file size
+        size = os.path.getsize(f)
+        if size > 1024 * 1024:
+            size_str = f"{size / 1024 / 1024:.1f} MB"
+        elif size > 1024:
+            size_str = f"{size / 1024:.1f} KB"
+        else:
+            size_str = f"{size} bytes"
+        print(f"  {i}. {f} ({size_str})")
+    print()
+
+    if len(vgm_files) == 1:
+        selected_file = vgm_files[0]
+        print(f"Selected: {selected_file}")
+    else:
+        while True:
+            try:
+                choice = input(f"Select a file (1-{len(vgm_files)}): ").strip()
+                if not choice:
+                    continue
+                idx = int(choice) - 1
+                if 0 <= idx < len(vgm_files):
+                    selected_file = vgm_files[idx]
+                    break
+                print(f"Please enter a number between 1 and {len(vgm_files)}")
+            except ValueError:
+                print("Please enter a number")
+            except KeyboardInterrupt:
+                print("\nCancelled.")
+                return 1
+
+    print()
+
+    # Step 3: Find serial port
+    print("Looking for Genesis Engine board...")
+    ports = serial.tools.list_ports.comports()
+
+    if not ports:
+        print()
+        print("ERROR: No serial ports found!")
+        print()
+        print("Please check:")
+        print("  1. Is the board plugged in via USB?")
+        print("  2. Is the correct driver installed?")
+        print()
+        input("Press Enter to exit...")
+        return 1
+
+    # Try to auto-detect
+    auto_port = find_arduino_port()
+
+    if auto_port:
+        print(f"  Found: {auto_port}")
+        selected_port = auto_port
+    elif len(ports) == 1:
+        selected_port = ports[0].device
+        print(f"  Found: {selected_port} ({ports[0].description})")
+    else:
+        print()
+        print("Multiple serial ports found:")
+        for i, port in enumerate(ports, 1):
+            print(f"  {i}. {port.device} - {port.description}")
+        print()
+        while True:
+            try:
+                choice = input(f"Select port (1-{len(ports)}): ").strip()
+                if not choice:
+                    continue
+                idx = int(choice) - 1
+                if 0 <= idx < len(ports):
+                    selected_port = ports[idx].device
+                    break
+                print(f"Please enter a number between 1 and {len(ports)}")
+            except ValueError:
+                print("Please enter a number")
+            except KeyboardInterrupt:
+                print("\nCancelled.")
+                return 1
+
+    print()
+
+    # Step 4: Ask about looping
+    print("Playback options:")
+    print("  1. Play once")
+    print("  2. Loop forever (Ctrl+C to stop)")
+    print()
+
+    loop_count = None
+    while True:
+        try:
+            choice = input("Select option (1-2) [1]: ").strip()
+            if not choice or choice == '1':
+                loop_count = None
+                break
+            elif choice == '2':
+                loop_count = 0  # 0 = infinite
+                break
+            print("Please enter 1 or 2")
+        except KeyboardInterrupt:
+            print("\nCancelled.")
+            return 1
+
+    print()
+    print("-" * 60)
+    print(f"  File: {selected_file}")
+    print(f"  Port: {selected_port}")
+    print(f"  Loop: {'Forever (Ctrl+C to stop)' if loop_count == 0 else 'Once'}")
+    print("-" * 60)
+    print()
+
+    try:
+        input("Press Enter to start streaming (Ctrl+C to cancel)...")
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        return 1
+
+    # Stream!
+    success = stream_vgm(
+        selected_port,
+        DEFAULT_BAUD,
+        selected_file,
+        dac_rate=None,  # Use board default
+        no_dac=False,
+        loop_count=loop_count,
+        verbose=False
+    )
+
+    if success:
+        print()
+        # Ask if they want to play another
+        try:
+            again = input("Play another file? (y/n) [n]: ").strip().lower()
+            if again in ('y', 'yes'):
+                print()
+                return interactive_wizard()  # Restart wizard
+        except KeyboardInterrupt:
+            pass
+
+    return 0 if success else 1
+
+
+# =============================================================================
 # Main
 # =============================================================================
 
@@ -898,15 +1085,8 @@ Looping:
         return 0
 
     if not args.file:
-        print("Usage: python stream_vgm.py <file.vgm> [options]")
-        print("\nOptions:")
-        print("  --port PORT      Serial port")
-        print("  --baud BAUD      Baud rate (default: 1000000)")
-        print("  --dac-rate N     DAC sample rate divisor (1, 2, or 4)")
-        print("  --no-dac         Strip all DAC data (FM/PSG only)")
-        print("  --loop [N]       Loop forever (--loop) or N times (--loop 3)")
-        print("  --list-ports     List available serial ports")
-        return 1
+        # No file specified - run interactive wizard
+        return interactive_wizard()
 
     if not os.path.exists(args.file):
         print(f"ERROR: File not found: {args.file}")

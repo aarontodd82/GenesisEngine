@@ -75,7 +75,8 @@ void GenesisBoard::begin() {
   initFastGPIO();
 
   // Give chips time to stabilize after power-on before reset
-  delay(50);
+  // Teensy boots very fast, need longer delay for YM2612/PSG to be ready
+  delay(200);
 
   // Reset both chips
   reset();
