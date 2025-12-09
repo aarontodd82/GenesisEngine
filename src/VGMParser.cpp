@@ -16,11 +16,6 @@ VGMParser::VGMParser(GenesisBoard& board)
     hasYM2612_(false),
     hasSN76489_(false),
     finished_(true),
-    pcmSeekPos_(0),
-    pcmData_(nullptr),
-    pcmDataSize_(0),
-    pcmDataMaxSize_(0),
-    pcmDataExternal_(false),
     unsupportedCallback_(nullptr)
 {
 }
@@ -32,12 +27,6 @@ VGMParser::VGMParser(GenesisBoard& board)
 void VGMParser::setSource(VGMSource* source) {
   source_ = source;
   reset();
-}
-
-void VGMParser::setPCMBuffer(uint8_t* buffer, uint32_t maxSize) {
-  pcmData_ = buffer;
-  pcmDataMaxSize_ = maxSize;
-  pcmDataExternal_ = true;
 }
 
 bool VGMParser::parseHeader() {
@@ -122,8 +111,7 @@ bool VGMParser::parseHeader() {
 
 void VGMParser::reset() {
   finished_ = true;
-  pcmSeekPos_ = 0;
-  pcmDataSize_ = 0;
+  pcmDataBank_.clear();
 }
 
 // =============================================================================
@@ -258,9 +246,9 @@ int32_t VGMParser::processCommand() {
   // YM2612 DAC + wait (0x80-0x8F)
   // -------------------------------------------------------------------------
   if (cmd >= 0x80 && cmd <= 0x8F) {
-    // Write PCM sample from current seek position
-    if (pcmData_ && pcmSeekPos_ < pcmDataSize_) {
-      board_.writeDAC(pcmData_[pcmSeekPos_++]);
+    // Write PCM sample from data bank
+    if (pcmDataBank_.hasData()) {
+      board_.writeDAC(pcmDataBank_.readByte());
     }
     // Return wait count (0-15 samples)
     return cmd & 0x0F;
@@ -270,7 +258,8 @@ int32_t VGMParser::processCommand() {
   // PCM data seek (0xE0)
   // -------------------------------------------------------------------------
   if (cmd == VGM_CMD_PCM_SEEK) {
-    pcmSeekPos_ = source_->readUInt32();
+    uint32_t seekPos = source_->readUInt32();
+    pcmDataBank_.seek(seekPos);
     return 0;
   }
 
@@ -306,6 +295,17 @@ int32_t VGMParser::processCommand() {
 // Data Block Handling
 // =============================================================================
 
+// Static callback wrapper for PCMDataBank::loadDataBlock
+static VGMSource* g_dataBlockSource = nullptr;
+
+static int dataBlockReadCallback(void* context) {
+  (void)context;
+  if (g_dataBlockSource) {
+    return g_dataBlockSource->read();
+  }
+  return -1;
+}
+
 void VGMParser::handleDataBlock() {
   // Format: 0x67 0x66 tt ss ss ss ss [data]
   // tt = data type
@@ -320,30 +320,25 @@ void VGMParser::handleDataBlock() {
   uint8_t dataType = source_->read();
   uint32_t dataSize = source_->readUInt32();
 
-  GENESIS_DEBUG_PRINT("Data block type ");
-  GENESIS_DEBUG_PRINT(dataType, HEX);
-  GENESIS_DEBUG_PRINT(" size ");
-  GENESIS_DEBUG_PRINTLN(dataSize);
+  Serial.print("Data block: type=0x");
+  Serial.print(dataType, HEX);
+  Serial.print(" size=");
+  Serial.println(dataSize);
 
-  // Only handle YM2612 PCM data (type 0x00)
-  if (dataType == VGM_DATA_YM2612_PCM && pcmData_ != nullptr) {
-    // Read into PCM buffer
-    uint32_t toRead = dataSize;
-    if (toRead > pcmDataMaxSize_) {
-      toRead = pcmDataMaxSize_;
-      GENESIS_DEBUG_PRINTLN("Warning: PCM data truncated");
-    }
-
-    source_->read(pcmData_, toRead);
-    pcmDataSize_ = toRead;
-
-    // Skip any remaining data we couldn't store
-    if (dataSize > toRead) {
-      source_->skip(dataSize - toRead);
-    }
+  // Handle YM2612 PCM data (type 0x00)
+  if (dataType == VGM_DATA_YM2612_PCM) {
+    // Use PCMDataBank to load the data
+    // It will automatically handle memory allocation and downsampling
+    g_dataBlockSource = source_;
+    pcmDataBank_.loadDataBlock(dataSize, dataBlockReadCallback, nullptr);
+    g_dataBlockSource = nullptr;
   } else {
-    // Skip unsupported data block
-    source_->skip(dataSize);
+    // Skip unsupported data block types
+    Serial.print("Skipping unsupported data block type 0x");
+    Serial.println(dataType, HEX);
+    for (uint32_t i = 0; i < dataSize; i++) {
+      source_->read();
+    }
   }
 }
 

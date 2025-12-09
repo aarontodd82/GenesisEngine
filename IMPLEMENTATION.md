@@ -76,6 +76,10 @@
 - Teensy-only (USB MIDI)
 - Phase 2 feature
 - Maps MIDI notes to YM2612 FM channels
+- **Deflemask Patch Support:** Load .dmp (Deflemask Preset) files to use custom FM instruments
+  - Deflemask is a popular chiptune tracker that exports YM2612 patches
+  - Goal: Load patches from SD card and use them as MIDI instruments
+  - Each MIDI channel can have a different Deflemask patch assigned
 
 ### DAC Pre-render (Phase 2)
 - Teensy with Audio Board only
@@ -138,18 +142,18 @@ GenesisEngine/
 │   │   ├── VGMSource.h             # Abstract base class
 │   │   ├── ProgmemSource.h         # Read from PROGMEM
 │   │   ├── ProgmemSource.cpp
-│   │   ├── StreamSource.h          # Read from any Stream (Serial, File)
-│   │   ├── StreamSource.cpp
-│   │   ├── SDSource.h              # SD card specific (conditional)
+│   │   ├── SDSource.h              # SD card file source (conditional)
 │   │   └── SDSource.cpp
+│   │
+│   ├── menu/
+│   │   ├── SDPlayerMenu.h          # Serial menu for SD player
+│   │   ├── SDPlayerMenu.cpp
+│   │   ├── Playlist.h              # M3U playlist parser
+│   │   └── Playlist.cpp
 │   │
 │   ├── config/
 │   │   ├── platform_detect.h       # Auto-detection macros
 │   │   └── feature_config.h        # Feature enable/disable logic
-│   │
-│   ├── menu/
-│   │   ├── GenesisEngineMenu.h     # Serial menu (optional include)
-│   │   └── GenesisEngineMenu.cpp
 │   │
 │   └── teensy/                     # Teensy-specific (conditional)
 │       ├── VGZDecompressor.h       # uzlib wrapper
@@ -162,16 +166,19 @@ GenesisEngine/
 ├── examples/
 │   ├── BasicPlayback/
 │   │   └── BasicPlayback.ino       # Simplest example - PROGMEM
+│   ├── GEPPlayback/
+│   │   └── GEPPlayback.ino         # GEP format playback
 │   ├── SDCardPlayer/
-│   │   └── SDCardPlayer.ino        # Play from SD card
+│   │   └── SDCardPlayer.ino        # SD card + serial menu (combined)
 │   ├── SerialStreaming/
-│   │   └── SerialStreaming.ino     # Stream VGM over serial
-│   ├── SerialMenu/
-│   │   └── SerialMenu.ino          # Interactive menu
+│   │   ├── SerialStreaming.ino     # Stream VGM over serial from PC
+│   │   └── StreamingProtocol.h     # Binary protocol definitions
 │   └── MidiInstrument/
-│       └── MidiInstrument.ino      # Teensy USB MIDI
+│       └── MidiInstrument.ino      # Teensy USB MIDI (Phase 4)
 │
 └── tools/
+    ├── stream_vgm.py               # Stream VGM from PC (companion to SerialStreaming)
+    ├── vgm_prep.py                 # Prepare VGM for SD card (decompress, strip DAC)
     ├── vgm2header.py               # Convert VGM/VGZ to C header (VGM format)
     ├── vgm2gep.py                  # Convert VGM/VGZ to GEP format
     ├── vgm_analyze.py              # Analyze VGM file structure
@@ -405,11 +412,16 @@ public:
 - [ ] vgm2header.py converter (needed for testing)
 - [ ] Basic example
 
-### Phase 2: SD Card Support
-- [ ] Stream source abstraction
-- [ ] SD card source
-- [ ] File-based playback
-- [ ] Serial menu
+### Phase 2: SD Card Support + Serial Menu (SDCardPlayer)
+- [ ] SDSource - VGMSource implementation for SD card files
+- [ ] Serial menu interface (combined with SD player, not separate)
+- [ ] M3U playlist support with loop counts
+- [ ] Python tools for VGM preparation:
+  - [ ] vgm_prep.py - Decompress VGZ, strip/reduce DAC, validate for target platform
+- [ ] Helpful error messages pointing users to preparation tools
+- [ ] Platform-specific limitations documented and enforced
+
+**See "SD Card Player Design" section below for full details.**
 
 ### Phase 3: Teensy Enhancements
 - [ ] VGZ decompression (uzlib)
@@ -419,6 +431,10 @@ public:
 
 ### Phase 4: Advanced Features
 - [ ] MIDI instrument mode
+  - [ ] Basic MIDI note on/off to YM2612 channels
+  - [ ] Deflemask .dmp patch file loading
+  - [ ] Patch assignment per MIDI channel
+  - [ ] Velocity sensitivity
 - [ ] GD3 tag parsing
 - [ ] Fade out on loop
 
@@ -431,6 +447,221 @@ public:
 - [ ] DAC pre-rendering system
 - [ ] AudioStream integration
 - [ ] Temp file management
+
+---
+
+## SD Card Player Design
+
+### Overview
+
+The SDCardPlayer example combines SD card playback with an interactive serial menu. Users can browse files, play songs, manage playlists, and control playback via serial terminal.
+
+### SPI Bus Sharing (Critical Issue)
+
+**Problem:** Both the Genesis Engine shift register and SD card use SPI:
+- Shift register: Uses hardware SPI (MOSI/SCK) for fast data output
+- SD card: Also uses hardware SPI (MOSI/MISO/SCK + CS)
+
+**Solution:** SPI bus sharing is supported - both devices can coexist on the same SPI bus with different chip select (CS) pins:
+- Shift register: No CS pin (directly connected, always receives data)
+- SD card: Uses dedicated CS pin (directly directly typically pin 10 on Uno, pin 53 on Mega, BUILTIN_SDCARD on Teensy 4.1)
+
+**Implementation:**
+1. SD card operations use `SPI.beginTransaction()` / `SPI.endTransaction()`
+2. GenesisBoard already uses `SPI.beginTransaction()` with SPISettings
+3. Both can share the bus - SD library handles CS automatically
+4. **Caution:** During SD reads, shift register may receive garbage data (but WR pins are high, so it's ignored)
+
+**Workaround if issues arise:** Fall back to software bit-bang for shift register (set `USE_HARDWARE_SPI 0` in GenesisBoard.cpp) - uses different pins than SD card.
+
+### Platform Support Matrix - SD Card
+
+| Platform | SD Support | VGZ Support | DAC Support | Notes |
+|----------|------------|-------------|-------------|-------|
+| Arduino Uno | Yes* | No | Limited | 2KB RAM, FM+PSG only recommended |
+| Arduino Mega | Yes* | No | Limited | 8KB RAM, small DAC files may work |
+| Teensy 4.1 | Yes (built-in) | Yes | Full | 1MB RAM, no limitations |
+| Teensy 4.0 | Yes (external) | Yes | Full | 1MB RAM |
+| ESP32 | Yes | Yes | Full | 520KB RAM |
+
+*Requires external SD module (SPI-based)
+
+### Arduino Uno/Mega Limitations
+
+**RAM Constraints:**
+- Uno: 2KB total, ~1KB available after stack/globals
+- Mega: 8KB total, ~6KB available
+
+**What works:**
+- VGM files (uncompressed) - read byte-by-byte from SD
+- FM synthesis (YM2612) - no buffering needed
+- PSG audio (SN76489) - no buffering needed
+
+**What doesn't work well:**
+- VGZ files - decompression needs ~32KB buffer
+- Heavy DAC/PCM - needs sample buffering, causes timing issues
+- Very large files - no issue with streaming, but limited error recovery
+
+**Recommendations for Uno/Mega users:**
+1. Use `.vgm` files only (not `.vgz`)
+2. Strip DAC data for consistent playback: `python tools/vgm_prep.py song.vgz --strip-dac`
+3. Or reduce DAC rate: `python tools/vgm_prep.py song.vgz --dac-rate 4`
+4. Keep playlist files small
+
+### SD Card Hardware Setup
+
+**Arduino Uno:**
+```
+SD Module    Arduino Uno
+---------    -----------
+CS      -->  Pin 10 (configurable)
+MOSI    -->  Pin 11 (hardware SPI)
+MISO    -->  Pin 12 (hardware SPI)
+SCK     -->  Pin 13 (hardware SPI)
+VCC     -->  5V
+GND     -->  GND
+```
+
+**Arduino Mega:**
+```
+SD Module    Arduino Mega
+---------    ------------
+CS      -->  Pin 53 (configurable)
+MOSI    -->  Pin 51 (hardware SPI)
+MISO    -->  Pin 50 (hardware SPI)
+SCK     -->  Pin 52 (hardware SPI)
+VCC     -->  5V
+GND     -->  GND
+```
+
+**Teensy 4.1:**
+- Built-in SD card slot, use `BUILTIN_SDCARD` for CS
+
+**ESP32:**
+- Default SPI pins vary by board, typically:
+  - CS: GPIO 5
+  - MOSI: GPIO 23
+  - MISO: GPIO 19
+  - SCK: GPIO 18
+
+### Serial Menu Commands
+
+```
+Genesis Engine SD Player
+========================
+Commands:
+  list              List VGM/VGZ files on SD card
+  play <n>          Play file by number
+  play <filename>   Play file by name
+  stop              Stop playback
+  pause             Pause/resume playback
+  next              Next track (playlist mode)
+  prev              Previous track (playlist mode)
+  loop              Toggle loop mode
+  playlist          Start playlist (plays playlist.m3u)
+  playlist <file>   Start specific playlist
+  info              Show current track info
+  help              Show this menu
+```
+
+### Playlist Format (M3U)
+
+Simple M3U format with optional extended info for loop counts:
+
+```m3u
+#EXTM3U
+#EXTINF:180,Song Title - loop:3
+song1.vgm
+#EXTINF:120,Another Song - loop:0
+song2.vgm
+plain_song.vgm
+```
+
+- `loop:N` in EXTINF comment sets loop count (0 = infinite, omit = play once)
+- Plain filenames (no EXTINF) play once
+- Lines starting with `#` (except EXTINF) are ignored
+- Relative paths from SD root
+
+### Error Messages and User Guidance
+
+The serial menu should provide helpful error messages:
+
+```
+ERROR: Cannot open 'song.vgz'
+  VGZ files are not supported on Arduino Uno/Mega.
+  Please decompress first:
+    python tools/vgm_prep.py song.vgz -o song.vgm
+
+ERROR: DAC playback issues detected
+  This file has heavy DAC/PCM usage which may not play well on Uno/Mega.
+  Try stripping DAC data:
+    python tools/vgm_prep.py song.vgm --strip-dac -o song_nodac.vgm
+  Or reducing sample rate:
+    python tools/vgm_prep.py song.vgm --dac-rate 4 -o song_lowdac.vgm
+
+ERROR: SD card not found
+  Please check:
+  1. SD card is inserted
+  2. SD card is FAT16/FAT32 formatted
+  3. CS pin is correctly configured (currently: pin 10)
+```
+
+### Python Preparation Tool (vgm_prep.py)
+
+New unified tool for preparing VGM files for SD card playback:
+
+```bash
+# Basic usage - decompress VGZ to VGM
+python tools/vgm_prep.py song.vgz -o song.vgm
+
+# Strip all DAC data (FM+PSG only)
+python tools/vgm_prep.py song.vgm --strip-dac -o song_nodac.vgm
+
+# Reduce DAC sample rate (1/4 rate)
+python tools/vgm_prep.py song.vgm --dac-rate 4 -o song_lowdac.vgm
+
+# Validate for specific platform
+python tools/vgm_prep.py song.vgm --validate uno
+python tools/vgm_prep.py song.vgm --validate mega
+python tools/vgm_prep.py song.vgm --validate teensy
+
+# Batch process a directory
+python tools/vgm_prep.py ./vgm_folder/ --strip-dac --output-dir ./sd_card/
+```
+
+### File Organization on SD Card
+
+Recommended structure:
+```
+SD Card Root/
+├── playlist.m3u        # Default playlist
+├── sonic.vgm
+├── streets.vgm
+├── thunder.vgm
+└── playlists/
+    ├── genesis.m3u
+    └── gamegear.m3u
+```
+
+### Implementation Notes
+
+**SDSource class:**
+- Wraps Arduino SD File object
+- Implements VGMSource interface (read, seek, etc.)
+- Handles file open/close
+- Reports file size for progress display
+
+**Menu class:**
+- Reads commands from Serial
+- Parses and dispatches to player
+- Displays status and errors
+- Non-blocking design (checks Serial.available() in loop)
+
+**Playlist class:**
+- Parses M3U files
+- Tracks current position
+- Handles loop counts per track
+- Signals when playlist is complete
 
 ---
 

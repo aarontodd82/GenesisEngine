@@ -5,6 +5,7 @@
 #include "VGMCommands.h"
 #include "sources/VGMSource.h"
 #include "GenesisBoard.h"
+#include "PCMDataBank.h"
 
 // =============================================================================
 // VGMParser - Parses and executes VGM commands
@@ -54,20 +55,19 @@ public:
 
   uint32_t getTotalSamples() const { return totalSamples_; }
   uint32_t getLoopSamples() const { return loopSamples_; }
+  uint32_t getLoopOffset() const { return loopOffset_; }
+  uint32_t getDataOffset() const { return dataOffset_; }
   uint32_t getVersion() const { return version_; }
   bool hasYM2612() const { return hasYM2612_; }
   bool hasSN76489() const { return hasSN76489_; }
 
   // -------------------------------------------------------------------------
-  // PCM Data (for DAC playback)
+  // PCM Data Bank (for DAC playback)
   // -------------------------------------------------------------------------
 
-  // Get current PCM data pointer (for DAC commands)
-  const uint8_t* getPCMData() const { return pcmData_; }
-  uint32_t getPCMDataSize() const { return pcmDataSize_; }
-
-  // Set external PCM data buffer (for platforms with enough RAM)
-  void setPCMBuffer(uint8_t* buffer, uint32_t maxSize);
+  // Get reference to PCM data bank
+  PCMDataBank& getPCMDataBank() { return pcmDataBank_; }
+  const PCMDataBank& getPCMDataBank() const { return pcmDataBank_; }
 
   // -------------------------------------------------------------------------
   // Callbacks
@@ -94,13 +94,9 @@ private:
 
   // Playback state
   bool finished_;
-  uint32_t pcmSeekPos_;
 
-  // PCM data buffer
-  uint8_t* pcmData_;
-  uint32_t pcmDataSize_;
-  uint32_t pcmDataMaxSize_;
-  bool pcmDataExternal_;
+  // PCM data bank for DAC playback
+  PCMDataBank pcmDataBank_;
 
   // Callback
   UnsupportedChipCallback unsupportedCallback_;

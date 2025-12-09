@@ -1,0 +1,25 @@
+{
+  "name": "uzlib",
+  "version": "2.9.5",
+  "description": "Lightweight DEFLATE/zlib/gzip decompression library",
+  "keywords": "gzip, zlib, deflate, decompression",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pfalcon/uzlib"
+  },
+  "authors": [
+    {
+      "name": "Paul Sokolovsky",
+      "url": "https://github.com/pfalcon"
+    }
+  ],
+  "license": "Zlib",
+  "frameworks": "arduino",
+  "platforms": "*",
+  "build": {
+    "srcFilter": [
+      "+<*.c>",
+      "+<*.h>"
+    ]
+  }
+}

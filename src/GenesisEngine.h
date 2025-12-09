@@ -8,6 +8,12 @@
 #include "VGMParser.h"
 #include "sources/VGMSource.h"
 #include "sources/ProgmemSource.h"
+#if GENESIS_ENGINE_USE_SD
+#include "sources/SDSource.h"
+#endif
+#if GENESIS_ENGINE_USE_VGZ
+#include "sources/VGZSource.h"
+#endif
 
 // =============================================================================
 // GenesisEngine - VGM Player for FM-90s Genesis Engine
@@ -123,6 +129,12 @@ private:
 
   // Sources
   ProgmemSource progmemSource_;
+#if GENESIS_ENGINE_USE_SD
+  SDSource sdSource_;
+#endif
+#if GENESIS_ENGINE_USE_VGZ
+  VGZSource vgzSource_;
+#endif
 
   // State
   GenesisEngineState state_;
@@ -137,21 +149,9 @@ private:
   uint32_t playbackStartTime_;  // micros() when playback started
   uint32_t samplesPlayed_;      // total samples worth of time elapsed
 
-  // PCM buffer for DAC playback
-  // Size depends on platform
-#if defined(PLATFORM_TEENSY4)
-  static constexpr uint32_t PCM_BUFFER_SIZE = 65536;  // 64KB
-#elif defined(PLATFORM_TEENSY3) || defined(PLATFORM_ESP32)
-  static constexpr uint32_t PCM_BUFFER_SIZE = 32768;  // 32KB
-#elif defined(PLATFORM_RP2040)
-  static constexpr uint32_t PCM_BUFFER_SIZE = 16384;  // 16KB
-#else
-  static constexpr uint32_t PCM_BUFFER_SIZE = 0;      // No PCM buffer on AVR
-#endif
-
-#if PCM_BUFFER_SIZE > 0
-  uint8_t pcmBuffer_[PCM_BUFFER_SIZE];
-#endif
+  // Note: PCM data for DAC playback is handled dynamically by PCMDataBank
+  // inside VGMParser. It allocates memory as needed (PSRAM if available,
+  // otherwise RAM) and automatically downsamples if memory is limited.
 
   // -------------------------------------------------------------------------
   // Internal Methods

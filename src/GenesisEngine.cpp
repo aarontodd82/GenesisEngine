@@ -23,9 +23,8 @@ GenesisEngine::GenesisEngine(GenesisBoard& board)
     playbackStartTime_(0),
     samplesPlayed_(0)
 {
-#if PCM_BUFFER_SIZE > 0
-  parser_.setPCMBuffer(pcmBuffer_, PCM_BUFFER_SIZE);
-#endif
+  // PCM data for DAC playback is now handled dynamically by PCMDataBank
+  // inside VGMParser - no pre-allocated buffer needed
 }
 
 // =============================================================================
@@ -186,13 +185,78 @@ void GenesisEngine::processCommands() {
 }
 
 // =============================================================================
-// SD Card Playback (placeholder for Phase 2)
+// SD Card Playback
 // =============================================================================
 
 #if GENESIS_ENGINE_USE_SD
 bool GenesisEngine::playFile(const char* path) {
-  // TODO: Implement in Phase 2
-  GENESIS_DEBUG_PRINTLN("SD playback not yet implemented");
-  return false;
-}
+  // Stop any current playback
+  stop();
+
+  // Check file extension
+  size_t len = strlen(path);
+  bool isVGZ = false;
+  if (len >= 4) {
+    const char* ext = path + len - 4;
+    isVGZ = (strcasecmp(ext, ".vgz") == 0);
+  }
+
+#if GENESIS_ENGINE_USE_VGZ
+  // Use VGZSource for VGZ files (streaming decompression)
+  if (isVGZ) {
+    if (!vgzSource_.openFile(path)) {
+      GENESIS_DEBUG_PRINT("Failed to open VGZ: ");
+      GENESIS_DEBUG_PRINTLN(path);
+      return false;
+    }
+
+    if (!vgzSource_.open()) {
+      GENESIS_DEBUG_PRINTLN("Failed to prepare VGZ source");
+      return false;
+    }
+
+    parser_.setSource(&vgzSource_);
+    bool success = startPlayback();
+
+    // After parsing header, notify VGZSource that we've reached data start
+    // This resets currentDataPos_ to 0, matching how MIDI-Player works
+    if (success) {
+      vgzSource_.setDataStart();
+
+      // Set loop offset relative to data start
+      if (parser_.hasLoop()) {
+        uint32_t loopOffsetInFile = 0x1C + parser_.getLoopOffset();
+        uint32_t dataStart = parser_.getDataOffset();
+        if (loopOffsetInFile >= dataStart) {
+          vgzSource_.setLoopOffset(loopOffsetInFile - dataStart);
+        }
+      }
+    }
+
+    return success;
+  }
+#else
+  // VGZ not supported on this platform
+  if (isVGZ) {
+    GENESIS_DEBUG_PRINTLN("VGZ files not supported on this platform");
+    GENESIS_DEBUG_PRINTLN("Use vgm_prep.py to decompress first");
+    return false;
+  }
 #endif
+
+  // Use SDSource for VGM files (direct streaming)
+  if (!sdSource_.openFile(path)) {
+    GENESIS_DEBUG_PRINT("Failed to open: ");
+    GENESIS_DEBUG_PRINTLN(path);
+    return false;
+  }
+
+  if (!sdSource_.open()) {
+    GENESIS_DEBUG_PRINTLN("Failed to prepare SD source");
+    return false;
+  }
+
+  parser_.setSource(&sdSource_);
+  return startPlayback();
+}
+#endif // GENESIS_ENGINE_USE_SD

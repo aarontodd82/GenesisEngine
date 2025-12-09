@@ -10,25 +10,51 @@
 
 // -----------------------------------------------------------------------------
 // SD Card Support
-// Auto-enabled on platforms with enough RAM
+// Enabled on all platforms (AVR reads byte-by-byte, no large buffers needed)
+// Note: AVR platforms (Uno/Mega) require external SD module
 // -----------------------------------------------------------------------------
 #ifndef GENESIS_ENGINE_DISABLE_SD
   #if defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3) || \
       defined(PLATFORM_ESP32) || defined(PLATFORM_RP2040) || \
-      defined(PLATFORM_SAM)
+      defined(PLATFORM_SAM) || defined(PLATFORM_AVR)
     #define GENESIS_ENGINE_USE_SD 1
+  #endif
+#endif
+
+// Ensure GENESIS_ENGINE_USE_SD is defined (as 0) if not enabled
+#ifndef GENESIS_ENGINE_USE_SD
+  #define GENESIS_ENGINE_USE_SD 0
+#endif
+
+// SD Card chip select pin (platform-specific defaults)
+#ifndef GENESIS_ENGINE_SD_CS_PIN
+  #if defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3)
+    #define GENESIS_ENGINE_SD_CS_PIN BUILTIN_SDCARD
+  #elif defined(PLATFORM_AVR) && defined(__AVR_ATmega2560__)
+    #define GENESIS_ENGINE_SD_CS_PIN 53  // Mega default
+  #elif defined(PLATFORM_AVR)
+    #define GENESIS_ENGINE_SD_CS_PIN 10  // Uno default
+  #elif defined(PLATFORM_ESP32)
+    #define GENESIS_ENGINE_SD_CS_PIN 5   // Common ESP32 default
+  #else
+    #define GENESIS_ENGINE_SD_CS_PIN 10  // Generic default
   #endif
 #endif
 
 // -----------------------------------------------------------------------------
 // VGZ Decompression (gzip)
-// Only on platforms with enough RAM for decompression buffer
+// Only on platforms with enough RAM for decompression buffer (~45KB)
 // -----------------------------------------------------------------------------
 #ifndef GENESIS_ENGINE_DISABLE_VGZ
   #if defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3) || \
       defined(PLATFORM_ESP32) || defined(PLATFORM_RP2040)
     #define GENESIS_ENGINE_USE_VGZ 1
   #endif
+#endif
+
+// Ensure GENESIS_ENGINE_USE_VGZ is defined (as 0) if not enabled
+#ifndef GENESIS_ENGINE_USE_VGZ
+  #define GENESIS_ENGINE_USE_VGZ 0
 #endif
 
 // -----------------------------------------------------------------------------
