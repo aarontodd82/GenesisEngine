@@ -95,6 +95,9 @@ private:
   // Playback state
   bool finished_;
 
+  // PSG attenuation for FM+PSG mix (reduces PSG volume when both chips present)
+  uint8_t psgAttenuation_;  // 0 = no attenuation, 2 = typical for FM+PSG mix
+
   // PCM data bank for DAC playback
   PCMDataBank pcmDataBank_;
 

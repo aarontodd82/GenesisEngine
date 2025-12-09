@@ -16,6 +16,7 @@ VGMParser::VGMParser(GenesisBoard& board)
     hasYM2612_(false),
     hasSN76489_(false),
     finished_(true),
+    psgAttenuation_(0),
     unsupportedCallback_(nullptr)
 {
 }
@@ -93,6 +94,16 @@ bool VGMParser::parseHeader() {
     return false;
   }
 
+  // Auto-attenuate PSG when both FM and PSG are present
+  // The hardware plays PSG a bit loud for PSG-only songs, so we reduce it
+  // by 2 levels when FM is also present to balance the mix
+  if (hasYM2612_ && hasSN76489_) {
+    psgAttenuation_ = 2;
+    GENESIS_DEBUG_PRINTLN("FM+PSG mix: PSG attenuated by 2");
+  } else {
+    psgAttenuation_ = 0;
+  }
+
   GENESIS_DEBUG_PRINT("VGM version: ");
   GENESIS_DEBUG_PRINTLN(version_, HEX);
   GENESIS_DEBUG_PRINT("YM2612: ");
@@ -111,6 +122,7 @@ bool VGMParser::parseHeader() {
 
 void VGMParser::reset() {
   finished_ = true;
+  psgAttenuation_ = 0;
   pcmDataBank_.clear();
 }
 
@@ -174,6 +186,19 @@ int32_t VGMParser::processCommand() {
   // -------------------------------------------------------------------------
   if (cmd == VGM_CMD_PSG) {
     uint8_t val = source_->read();
+
+    // Apply PSG attenuation for FM+PSG mix
+    // PSG attenuation command format: 1cc1aaaa (bit 7=1, bit 4=1, bits 0-3=attenuation)
+    if (psgAttenuation_ > 0 && (val & 0x90) == 0x90) {
+      uint8_t currentAtten = val & 0x0F;
+      // If already silent (15), leave it. Otherwise increase but cap at 14.
+      if (currentAtten < 15) {
+        uint8_t newAtten = currentAtten + psgAttenuation_;
+        if (newAtten > 14) newAtten = 14;  // Don't silence, cap at 14
+        val = (val & 0xF0) | newAtten;
+      }
+    }
+
     board_.writePSG(val);
     return 0;
   }
