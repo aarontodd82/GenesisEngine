@@ -333,6 +333,7 @@ bool processOneCommand() {
       board.reset();
       connected = false;
       waitPending = false;
+      targetTime = micros();  // Reset timing for next stream
       return true;
 
     case CMD_PSG_WRITE: {
