@@ -8,10 +8,10 @@
  * all timing internally. Register writes arrive exactly when they should
  * be executed, so we just write them immediately to the hardware.
  *
- * Uses chunked protocol with flow control (same as SerialStreaming):
- *   - Emulator sends: [0x01][length][data...][checksum]
- *   - Arduino ACKs with 0x06 (FLOW_READY) when chunk processed
- *   - This prevents data loss from buffer overflows
+ * Simple protocol (no chunking - relies on USB buffering):
+ *   - Raw command bytes streamed directly
+ *   - PING (0x00) for connection handshake
+ *   - Large ring buffer absorbs timing variations
  *
  * Pin Connections:
  *   Control Pins (directly to chips):
@@ -38,56 +38,43 @@
 
 #define SERIAL_BAUD 1000000
 
-// Board-specific settings
+// Board-specific settings - LARGE buffers for real-time streaming
 #if defined(__AVR_ATmega328P__)
   #define BOARD_TYPE 1  // Uno
   #define BUFFER_SIZE 512
   #define BUFFER_MASK 0x1FF
-  #define CHUNK_SIZE 64
 #elif defined(__AVR_ATmega2560__)
   #define BOARD_TYPE 2  // Mega
   #define BUFFER_SIZE 2048
   #define BUFFER_MASK 0x7FF
-  #define CHUNK_SIZE 64
 #elif defined(__IMXRT1062__)
-  #define BOARD_TYPE 4  // Teensy 4.x
-  #define BUFFER_SIZE 4096
-  #define BUFFER_MASK 0xFFF
-  #define CHUNK_SIZE 64
+  #define BOARD_TYPE 4  // Teensy 4.x - 32KB buffer!
+  #define BUFFER_SIZE 32768
+  #define BUFFER_MASK 0x7FFF
 #elif defined(ESP32)
   #define BOARD_TYPE 5  // ESP32
-  #define BUFFER_SIZE 4096
-  #define BUFFER_MASK 0xFFF
-  #define CHUNK_SIZE 64
+  #define BUFFER_SIZE 16384
+  #define BUFFER_MASK 0x3FFF
 #else
   #define BOARD_TYPE 3  // Other
-  #define BUFFER_SIZE 2048
-  #define BUFFER_MASK 0x7FF
-  #define CHUNK_SIZE 64
+  #define BUFFER_SIZE 4096
+  #define BUFFER_MASK 0xFFF
 #endif
 
 // =============================================================================
 // Protocol Constants (must match serial_bridge.c)
 // =============================================================================
 
-// Control commands
 #define CMD_PING             0x00
 #define CMD_ACK              0x0F
-
-// Chip write commands (VGM-compatible)
 #define CMD_PSG_WRITE        0x50  // 1 byte:  value
 #define CMD_YM2612_PORT0     0x52  // 2 bytes: register, value
 #define CMD_YM2612_PORT1     0x53  // 2 bytes: register, value
-
-// Stream control
 #define CMD_END_STREAM       0x66  // Reset/silence chips
+#define FLOW_READY           0x06  // Ready signal for handshake
 
-// Chunk protocol
-#define CHUNK_HEADER         0x01
-
-// Flow control responses
-#define FLOW_READY           0x06  // ASCII ACK - ready for more data
-#define FLOW_NAK             0x15  // ASCII NAK - bad checksum, retry
+// YM2612 DAC register - use fast path for these writes
+#define REG_DAC              0x2A
 
 // =============================================================================
 // Pin Configuration
@@ -104,23 +91,27 @@ const uint8_t PIN_SCK  = 7;
 const uint8_t PIN_SDI  = 8;
 
 // =============================================================================
-// Ring Buffer - decouple chunk reception from command processing
+// Ring Buffer - large buffer absorbs timing variations
 // =============================================================================
 
 volatile uint8_t ringBuffer[BUFFER_SIZE];
-volatile uint16_t ringHead = 0;
-volatile uint16_t ringTail = 0;
+volatile uint32_t ringHead = 0;
+volatile uint32_t ringTail = 0;
 
-inline uint16_t ringAvailable() {
+inline uint32_t ringAvailable() {
   return (ringHead - ringTail) & BUFFER_MASK;
 }
 
-inline uint16_t ringFree() {
+inline uint32_t ringFree() {
   return BUFFER_SIZE - 1 - ringAvailable();
 }
 
 inline bool ringEmpty() {
   return ringHead == ringTail;
+}
+
+inline bool ringFull() {
+  return ringAvailable() >= (BUFFER_SIZE - 1);
 }
 
 inline void ringWrite(uint8_t b) {
@@ -144,7 +135,6 @@ inline uint8_t ringPeek() {
 
 GenesisBoard board(PIN_WR_P, PIN_WR_Y, PIN_IC_Y, PIN_A0_Y, PIN_A1_Y, PIN_SCK, PIN_SDI);
 
-// Connection state
 bool connected = false;
 uint32_t lastActivityTime = 0;
 
@@ -172,96 +162,37 @@ void setup() {
 }
 
 // =============================================================================
-// Chunk Reception State Machine (like SerialStreaming.ino)
+// Data Reception - With backpressure handling
 // =============================================================================
 
-enum RxState { RX_IDLE, RX_HAVE_HEADER, RX_HAVE_LENGTH, RX_READING_DATA };
-RxState rxState = RX_IDLE;
-uint8_t rxLength = 0;
-uint8_t rxCount = 0;
-uint8_t rxChecksum = 0;
-uint8_t rxTempBuf[CHUNK_SIZE];
+// Forward declaration
+void processOneCommand();
 
-// Process incoming serial data - receives chunks with flow control
 void receiveData() {
+  // Read all available bytes directly into ring buffer
   while (Serial.available() > 0) {
+    // If buffer is getting full, process some commands first
+    // This creates backpressure - we process before accepting more
+    while (ringFree() < 64 && !ringEmpty()) {
+      processOneCommand();
+    }
+
     uint8_t b = Serial.read();
     lastActivityTime = millis();
 
-    switch (rxState) {
-      case RX_IDLE:
-        // Handle PING - reset everything
-        if (b == CMD_PING) {
-          board.reset();
-          ringHead = ringTail = 0;
-          connected = true;
-          Serial.write(CMD_ACK);
-          Serial.write(BOARD_TYPE);
-          Serial.write(FLOW_READY);
-          break;
-        }
-
-        // Handle direct END_STREAM (not in a chunk)
-        if (b == CMD_END_STREAM) {
-          board.reset();
-          connected = false;
-          Serial.write(FLOW_READY);
-          break;
-        }
-
-        // Chunk header - start receiving chunk
-        if (b == CHUNK_HEADER) {
-          rxState = RX_HAVE_HEADER;
-        }
-        break;
-
-      case RX_HAVE_HEADER:
-        // This byte is the length
-        if (b == 0 || b > CHUNK_SIZE) {
-          // Invalid length, go back to idle
-          rxState = RX_IDLE;
-          break;
-        }
-        rxLength = b;
-        rxCount = 0;
-        rxChecksum = b;  // Start checksum with length
-        rxState = RX_HAVE_LENGTH;
-        break;
-
-      case RX_HAVE_LENGTH: {
-        // Reading data bytes
-        rxTempBuf[rxCount++] = b;
-        rxChecksum ^= b;
-
-        // Bulk read remaining bytes if available
-        while (rxCount < rxLength && Serial.available() > 0) {
-          uint8_t d = Serial.read();
-          rxTempBuf[rxCount++] = d;
-          rxChecksum ^= d;
-        }
-
-        if (rxCount >= rxLength) {
-          rxState = RX_READING_DATA;  // Next byte is checksum
-        }
-        break;
-      }
-
-      case RX_READING_DATA:
-        // This byte is the checksum
-        if (b == rxChecksum && ringFree() >= rxLength) {
-          // Valid chunk - copy to ring buffer
-          for (uint8_t i = 0; i < rxLength; i++) {
-            ringWrite(rxTempBuf[i]);
-          }
-          // ACK the chunk immediately
-          Serial.write(FLOW_READY);
-        } else {
-          // Bad checksum or no room - NAK
-          Serial.write(FLOW_NAK);
-        }
-        rxState = RX_IDLE;
-        break;
+    // Handle PING specially - it's a connection request
+    if (!connected && b == CMD_PING) {
+      board.reset();
+      ringHead = ringTail = 0;
+      connected = true;
+      Serial.write(CMD_ACK);
+      Serial.write(BOARD_TYPE);
+      Serial.write(FLOW_READY);
+      continue;
     }
+
+    // Buffer the byte for processing
+    ringWrite(b);
   }
 }
 
@@ -285,23 +216,26 @@ uint8_t commandSize(uint8_t cmd) {
   }
 }
 
-// Process commands from ring buffer
-void processCommands() {
-  while (!ringEmpty()) {
-    uint8_t cmd = ringPeek();
-    uint8_t needed = commandSize(cmd);
+// Process a single command from ring buffer
+// Returns true if a command was processed, false if not enough data
+void processOneCommand() {
+  if (ringEmpty()) return;
 
-    // Wait until we have the full command
-    if (ringAvailable() < needed) {
-      return;
-    }
+  uint8_t cmd = ringPeek();
+  uint8_t needed = commandSize(cmd);
 
-    // Consume command byte
-    ringRead();
+  // Wait until we have the full command
+  if (ringAvailable() < needed) {
+    return;
+  }
 
-    switch (cmd) {
-      case CMD_PING:
-        // Should be handled in receiveData, but just in case
+  // Consume command byte
+  ringRead();
+
+  switch (cmd) {
+    case CMD_PING:
+      // Only handle PING if not connected - ignore stray 0x00 bytes in stream
+      if (!connected) {
         board.reset();
         ringHead = ringTail = 0;
         connected = true;
@@ -309,39 +243,69 @@ void processCommands() {
         Serial.write(BOARD_TYPE);
         Serial.write(FLOW_READY);
         return;
-
-      case CMD_END_STREAM:
-        board.reset();
-        connected = false;
-        break;
-
-      case CMD_PSG_WRITE: {
-        uint8_t value = ringRead();
-        board.writePSG(value);
-        break;
       }
+      // If connected, this is likely a stray 0x00 data byte - ignore it
+      break;
 
-      case CMD_YM2612_PORT0: {
-        uint8_t reg = ringRead();
-        uint8_t value = ringRead();
-        board.writeYM2612(0, reg, value);
-        break;
-      }
+    case CMD_END_STREAM:
+      // Only process if we receive it twice in a row (makes it unlikely to be accidental)
+      // For now, just reset - the emulator will reconnect if needed
+      board.reset();
+      connected = false;
+      break;
 
-      case CMD_YM2612_PORT1: {
-        uint8_t reg = ringRead();
-        uint8_t value = ringRead();
-        board.writeYM2612(1, reg, value);
-        break;
-      }
-
-      default:
-        // Unknown command - skip
-        break;
+    case CMD_PSG_WRITE: {
+      uint8_t value = ringRead();
+      board.writePSG(value);
+      break;
     }
 
-    // Check for more incoming data periodically
-    receiveData();
+    case CMD_YM2612_PORT0: {
+      uint8_t reg = ringRead();
+      uint8_t value = ringRead();
+      // Use fast DAC path for register 0x2A
+      if (reg == REG_DAC) {
+        // Pace DAC writes to ~22kHz (45µs) - prevents sample loss from batched data
+        static uint32_t lastDacTime = 0;
+        uint32_t now = micros();
+        uint32_t elapsed = now - lastDacTime;
+        if (elapsed < 45) {
+          delayMicroseconds(45 - elapsed);
+        }
+        board.writeDAC(value);
+        lastDacTime = micros();
+      } else {
+        board.writeYM2612(0, reg, value);
+      }
+      break;
+    }
+
+    case CMD_YM2612_PORT1: {
+      uint8_t reg = ringRead();
+      uint8_t value = ringRead();
+      board.writeYM2612(1, reg, value);
+      break;
+    }
+
+    default:
+      // Unknown command - skip
+      break;
+  }
+}
+
+// Process all available commands from ring buffer
+void processCommands() {
+  uint16_t cmdCount = 0;
+
+  while (!ringEmpty()) {
+    processOneCommand();
+
+    // Check for more incoming data very frequently
+    // USB buffer is only 1KB, can overflow in ~10ms at our data rate
+    if (++cmdCount >= 8) {
+      receiveData();
+      cmdCount = 0;
+    }
   }
 }
 
@@ -350,7 +314,7 @@ void processCommands() {
 // =============================================================================
 
 void loop() {
-  // Receive chunks (with flow control)
+  // Receive data into ring buffer
   receiveData();
 
   // Process commands from ring buffer
