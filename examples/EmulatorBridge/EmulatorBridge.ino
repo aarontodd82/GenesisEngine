@@ -4,14 +4,11 @@
  * This example receives real-time register writes from a Genesis/Mega Drive
  * emulator (like BlastEm) and plays them on actual YM2612 and SN76489 chips.
  *
- * Unlike VGM streaming, there are NO timing commands - the emulator handles
- * all timing internally. Register writes arrive exactly when they should
- * be executed, so we just write them immediately to the hardware.
- *
- * Simple protocol (no chunking - relies on USB buffering):
- *   - Raw command bytes streamed directly
- *   - PING (0x00) for connection handshake
- *   - Large ring buffer absorbs timing variations
+ * Protocol with delta timing:
+ *   - PING (0x00) single byte for connection handshake (before streaming)
+ *   - Once connected, all commands have format: [delta_hi] [delta_lo] [cmd] [data...]
+ *   - Delta is microseconds to wait BEFORE executing the command
+ *   - This preserves exact timing regardless of USB batching
  *
  * Pin Connections:
  *   Control Pins (directly to chips):
@@ -62,7 +59,7 @@
 #endif
 
 // =============================================================================
-// Protocol Constants (must match serial_bridge.c)
+// Protocol Constants - VGM format (must match serial_bridge.c)
 // =============================================================================
 
 #define CMD_PING             0x00
@@ -70,11 +67,20 @@
 #define CMD_PSG_WRITE        0x50  // 1 byte:  value
 #define CMD_YM2612_PORT0     0x52  // 2 bytes: register, value
 #define CMD_YM2612_PORT1     0x53  // 2 bytes: register, value
+#define CMD_WAIT             0x61  // 2 bytes: sample count (little-endian, 44100 Hz)
+#define CMD_WAIT_60          0x62  // Wait 735 samples (1/60 sec)
+#define CMD_WAIT_50          0x63  // Wait 882 samples (1/50 sec)
 #define CMD_END_STREAM       0x66  // Reset/silence chips
+#define CMD_WAIT_SHORT_BASE  0x70  // 0x70-0x7F: wait 1-16 samples
 #define FLOW_READY           0x06  // Ready signal for handshake
 
 // YM2612 DAC register - use fast path for these writes
 #define REG_DAC              0x2A
+
+// Microseconds per sample at 44100 Hz (fixed-point: 22.68us ≈ 23us)
+// For better accuracy: 1000000 / 44100 = 22.6757...
+// We'll use integer math: micros = samples * 1000000 / 44100
+#define SAMPLES_TO_MICROS(s) ((uint32_t)(s) * 1000000UL / 44100UL)
 
 // =============================================================================
 // Pin Configuration
@@ -129,6 +135,10 @@ inline uint8_t ringPeek() {
   return ringBuffer[ringTail];
 }
 
+inline uint8_t ringPeekAt(uint32_t offset) {
+  return ringBuffer[(ringTail + offset) & BUFFER_MASK];
+}
+
 // =============================================================================
 // Globals
 // =============================================================================
@@ -137,6 +147,11 @@ GenesisBoard board(PIN_WR_P, PIN_WR_Y, PIN_IC_Y, PIN_A0_Y, PIN_A1_Y, PIN_SCK, PI
 
 bool connected = false;
 uint32_t lastActivityTime = 0;
+
+// Timing state for VGM-style wait commands
+// We track accumulated wait time and execute commands when ready
+uint32_t targetTime = 0;        // When we should next allow command execution (micros)
+bool waitPending = false;       // True when we're waiting for targetTime
 
 // Timeout: silence chips if no data received (emulator paused/closed)
 #define ACTIVITY_TIMEOUT_MS 1000
@@ -165,26 +180,35 @@ void setup() {
 // Data Reception - With backpressure handling
 // =============================================================================
 
-// Forward declaration
-void processOneCommand();
+// Forward declarations
+uint8_t getCommandSize(uint8_t cmd);
+bool processOneCommand();
 
 void receiveData() {
   // Read all available bytes directly into ring buffer
   while (Serial.available() > 0) {
-    // If buffer is getting full, process some commands first
-    // This creates backpressure - we process before accepting more
+    // If buffer is getting full, try to process commands first
     while (ringFree() < 64 && !ringEmpty()) {
-      processOneCommand();
+      if (!processOneCommand()) break;  // Waiting for time
+    }
+
+    // CRITICAL: If buffer is still full, STOP reading to prevent overflow!
+    // This creates backpressure on the serial port.
+    if (ringFree() == 0) {
+      return;  // Buffer full - stop reading until we process more
     }
 
     uint8_t b = Serial.read();
     lastActivityTime = millis();
 
-    // Handle PING specially - it's a connection request
-    if (!connected && b == CMD_PING) {
+    // Handle PING specially - only when NOT connected or buffer is empty
+    // (0x00 can appear as data bytes, so we can't check every byte)
+    if (b == CMD_PING && (!connected || ringEmpty())) {
       board.reset();
       ringHead = ringTail = 0;
       connected = true;
+      targetTime = micros();    // Reset timing for new connection
+      waitPending = false;      // No wait pending
       Serial.write(CMD_ACK);
       Serial.write(BOARD_TYPE);
       Serial.write(FLOW_READY);
@@ -197,115 +221,157 @@ void receiveData() {
 }
 
 // =============================================================================
-// Command Processing - reads from ring buffer
+// Command Processing - VGM format from ring buffer
 // =============================================================================
 
-// Get command size based on command byte
-uint8_t commandSize(uint8_t cmd) {
+// Get total command size including the command byte itself
+// Returns 0 for unknown commands (we'll skip 1 byte)
+uint8_t getCommandSize(uint8_t cmd) {
+  if (cmd >= CMD_WAIT_SHORT_BASE && cmd <= 0x7F) {
+    return 1;  // 0x70-0x7F: just the command byte
+  }
   switch (cmd) {
-    case CMD_PING:
+    case CMD_WAIT_60:
+    case CMD_WAIT_50:
     case CMD_END_STREAM:
-      return 1;
+      return 1;  // Just command byte
     case CMD_PSG_WRITE:
-      return 2;  // cmd + 1 byte
+      return 2;  // cmd + value
+    case CMD_WAIT:
+      return 3;  // cmd + 2 bytes sample count
     case CMD_YM2612_PORT0:
     case CMD_YM2612_PORT1:
-      return 3;  // cmd + 2 bytes
+      return 3;  // cmd + reg + value
     default:
-      return 1;  // Unknown - skip
+      return 1;  // Unknown - skip 1 byte
   }
 }
 
-// Process a single command from ring buffer
-// Returns true if a command was processed, false if not enough data
-void processOneCommand() {
-  if (ringEmpty()) return;
-
-  uint8_t cmd = ringPeek();
-  uint8_t needed = commandSize(cmd);
-
-  // Wait until we have the full command
-  if (ringAvailable() < needed) {
-    return;
+// Process a single command from ring buffer (NON-BLOCKING)
+// VGM format: commands are variable length, wait commands add delays
+// Returns: true if command was processed, false if waiting or no data
+bool processOneCommand() {
+  // If we're waiting for a target time, check if it's time yet
+  if (waitPending) {
+    uint32_t now = micros();
+    int32_t timeRemaining = (int32_t)(targetTime - now);
+    if (timeRemaining > 0) {
+      // Not time yet - keep waiting
+      return false;
+    }
+    waitPending = false;
   }
 
-  // Consume command byte
+  // Need at least 1 byte to peek at command
+  if (ringAvailable() < 1) return false;
+
+  uint8_t cmd = ringPeek();
+  uint8_t cmdSize = getCommandSize(cmd);
+
+  // Wait until we have the full command
+  if (ringAvailable() < cmdSize) return false;
+
+  // Consume the command byte
   ringRead();
+  lastActivityTime = millis();
+
+  // Handle wait commands - they ACCUMULATE onto targetTime (not reset!)
+  // This prevents drift - timing is based on when commands SHOULD execute,
+  // not when they actually do.
+  if (cmd >= CMD_WAIT_SHORT_BASE && cmd <= 0x7F) {
+    // Short wait: 0x70 = 1 sample, 0x7F = 16 samples
+    uint8_t samples = (cmd - CMD_WAIT_SHORT_BASE) + 1;
+    targetTime += SAMPLES_TO_MICROS(samples);
+    // If we're behind, snap to now (don't try to catch up - that would play too fast)
+    uint32_t now = micros();
+    if ((int32_t)(now - targetTime) > 0) {
+      targetTime = now;
+    }
+    waitPending = true;
+    return true;  // Command processed (wait started)
+  }
 
   switch (cmd) {
-    case CMD_PING:
-      // Only handle PING if not connected - ignore stray 0x00 bytes in stream
-      if (!connected) {
-        board.reset();
-        ringHead = ringTail = 0;
-        connected = true;
-        Serial.write(CMD_ACK);
-        Serial.write(BOARD_TYPE);
-        Serial.write(FLOW_READY);
-        return;
+    case CMD_WAIT: {
+      // 16-bit wait: little-endian sample count
+      uint8_t lo = ringRead();
+      uint8_t hi = ringRead();
+      uint16_t samples = ((uint16_t)hi << 8) | lo;
+      targetTime += SAMPLES_TO_MICROS(samples);
+      // Snap to now if behind
+      uint32_t now = micros();
+      if ((int32_t)(now - targetTime) > 0) {
+        targetTime = now;
       }
-      // If connected, this is likely a stray 0x00 data byte - ignore it
-      break;
+      waitPending = true;
+      return true;
+    }
+
+    case CMD_WAIT_60: {
+      // Wait 735 samples (1/60 sec)
+      targetTime += SAMPLES_TO_MICROS(735);
+      uint32_t now = micros();
+      if ((int32_t)(now - targetTime) > 0) {
+        targetTime = now;
+      }
+      waitPending = true;
+      return true;
+    }
+
+    case CMD_WAIT_50: {
+      // Wait 882 samples (1/50 sec)
+      targetTime += SAMPLES_TO_MICROS(882);
+      uint32_t now = micros();
+      if ((int32_t)(now - targetTime) > 0) {
+        targetTime = now;
+      }
+      waitPending = true;
+      return true;
+    }
 
     case CMD_END_STREAM:
-      // Only process if we receive it twice in a row (makes it unlikely to be accidental)
-      // For now, just reset - the emulator will reconnect if needed
       board.reset();
       connected = false;
-      break;
+      waitPending = false;
+      return true;
 
     case CMD_PSG_WRITE: {
       uint8_t value = ringRead();
       board.writePSG(value);
-      break;
+      return true;
     }
 
     case CMD_YM2612_PORT0: {
       uint8_t reg = ringRead();
       uint8_t value = ringRead();
-      // Use fast DAC path for register 0x2A
       if (reg == REG_DAC) {
-        // Pace DAC writes to ~22kHz (45µs) - prevents sample loss from batched data
-        static uint32_t lastDacTime = 0;
-        uint32_t now = micros();
-        uint32_t elapsed = now - lastDacTime;
-        if (elapsed < 45) {
-          delayMicroseconds(45 - elapsed);
-        }
         board.writeDAC(value);
-        lastDacTime = micros();
       } else {
         board.writeYM2612(0, reg, value);
       }
-      break;
+      return true;
     }
 
     case CMD_YM2612_PORT1: {
       uint8_t reg = ringRead();
       uint8_t value = ringRead();
       board.writeYM2612(1, reg, value);
-      break;
+      return true;
     }
 
     default:
-      // Unknown command - skip
-      break;
+      // Unknown command - already consumed 1 byte, continue
+      return true;
   }
 }
 
-// Process all available commands from ring buffer
+// Process commands that are ready to execute (non-blocking)
 void processCommands() {
-  uint16_t cmdCount = 0;
-
-  while (!ringEmpty()) {
-    processOneCommand();
-
-    // Check for more incoming data very frequently
-    // USB buffer is only 1KB, can overflow in ~10ms at our data rate
-    if (++cmdCount >= 8) {
-      receiveData();
-      cmdCount = 0;
-    }
+  // Keep processing while commands are ready (returns true)
+  // Stop when waiting for time or no data
+  while (processOneCommand()) {
+    // After each command, check for incoming data
+    receiveData();
   }
 }
 
