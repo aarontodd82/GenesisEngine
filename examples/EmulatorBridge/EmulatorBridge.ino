@@ -62,7 +62,7 @@
 // Protocol Constants - VGM format (must match serial_bridge.c)
 // =============================================================================
 
-#define CMD_PING             0x00
+#define CMD_PING             0xAA  // Chosen to not conflict with VGM commands or data
 #define CMD_ACK              0x0F
 #define CMD_PSG_WRITE        0x50  // 1 byte:  value
 #define CMD_YM2612_PORT0     0x52  // 2 bytes: register, value
@@ -201,9 +201,9 @@ void receiveData() {
     uint8_t b = Serial.read();
     lastActivityTime = millis();
 
-    // Handle PING specially - only when NOT connected or buffer is empty
-    // (0x00 can appear as data bytes, so we can't check every byte)
-    if (b == CMD_PING && (!connected || ringEmpty())) {
+    // Handle PING - 0xAA is not a valid VGM command, so safe to check anytime
+    // Only respond when not connected (prevents accidental reconnect mid-stream)
+    if (b == CMD_PING && !connected) {
       board.reset();
       ringHead = ringTail = 0;
       connected = true;
@@ -331,9 +331,8 @@ bool processOneCommand() {
 
     case CMD_END_STREAM:
       board.reset();
-      connected = false;
       waitPending = false;
-      targetTime = micros();  // Reset timing for next stream
+      targetTime = micros();
       return true;
 
     case CMD_PSG_WRITE: {
@@ -387,9 +386,6 @@ void loop() {
   // Process commands from ring buffer
   processCommands();
 
-  // Check for timeout (emulator closed/paused)
-  if (connected && (millis() - lastActivityTime > ACTIVITY_TIMEOUT_MS)) {
-    board.reset();
-    connected = false;
-  }
+  // Timeout disabled - was killing SEGA sample during ROM load gap
+  // TODO: Need smarter approach for hung notes (maybe only on explicit disconnect?)
 }
