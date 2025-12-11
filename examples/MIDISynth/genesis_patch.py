@@ -4,20 +4,24 @@ genesis_patch.py - Patch management tool for GenesisEngine MIDISynth
 
 Commands:
     list-ports              List available MIDI ports
-    load <file> <channel>   Load TFI/DMP patch to FM channel (0-5)
-    store <file> <slot>     Store patch to slot (0-15)
+    load <file> <channel>   Load TFI/DMP patch to FM channel (1-6)
+    store <file> <slot>     Store patch to slot (1-16)
     recall <slot> <channel> Recall patch from slot to channel
     bank <file>             Load GYB bank (use Program Change to select)
     convert <in> <out>      Convert between patch formats
+    poly                    Switch to poly mode (6-voice polyphonic on Ch 1)
+    multi                   Switch to multi-timbral mode (6 independent channels)
 
 Requirements:
     pip install python-rtmidi
 
 Examples:
     python genesis_patch.py list-ports
-    python genesis_patch.py load piano.tfi 0
+    python genesis_patch.py load piano.tfi 1
     python genesis_patch.py store bass.dmp 5
     python genesis_patch.py bank sonic2.gyb
+    python genesis_patch.py poly
+    python genesis_patch.py multi
 """
 
 import sys
@@ -61,25 +65,25 @@ def send_sysex(midiout, cmd, data):
 
 
 def send_patch_to_channel(midiout, channel, patch_data):
-    """Send FM patch data to a channel (0-5)"""
+    """Send FM patch data to a channel (0-5 internal)"""
     if len(patch_data) != 42:
         raise ValueError(f"Patch must be 42 bytes, got {len(patch_data)}")
     send_sysex(midiout, CMD_LOAD_PATCH, [channel] + list(patch_data))
-    print(f"Sent patch to FM channel {channel}")
+    print(f"Sent patch to FM channel {channel + 1}")
 
 
 def store_patch_to_slot(midiout, slot, patch_data):
-    """Store FM patch to a slot (0-15)"""
+    """Store FM patch to a slot (0-15 internal)"""
     if len(patch_data) != 42:
         raise ValueError(f"Patch must be 42 bytes, got {len(patch_data)}")
     send_sysex(midiout, CMD_STORE_PATCH, [slot] + list(patch_data))
-    print(f"Stored patch to slot {slot}")
+    print(f"Stored patch to slot {slot + 1}")
 
 
 def recall_patch(midiout, slot, channel):
-    """Recall patch from slot to channel"""
+    """Recall patch from slot to channel (0-based internal)"""
     send_sysex(midiout, CMD_RECALL_PATCH, [channel, slot])
-    print(f"Recalled slot {slot} to channel {channel}")
+    print(f"Recalled slot {slot + 1} to channel {channel + 1}")
 
 
 # =============================================================================
@@ -346,7 +350,7 @@ def cmd_load(args):
         return 1
 
     midiout.open_port(port_idx)
-    send_patch_to_channel(midiout, args.channel, patch_data)
+    send_patch_to_channel(midiout, args.channel - 1, patch_data)  # Convert to 0-based
     midiout.close_port()
 
 
@@ -361,7 +365,7 @@ def cmd_store(args):
         return 1
 
     midiout.open_port(port_idx)
-    store_patch_to_slot(midiout, args.slot, patch_data)
+    store_patch_to_slot(midiout, args.slot - 1, patch_data)  # Convert to 0-based
     midiout.close_port()
 
 
@@ -374,7 +378,7 @@ def cmd_recall(args):
         return 1
 
     midiout.open_port(port_idx)
-    recall_patch(midiout, args.slot, args.channel)
+    recall_patch(midiout, args.slot - 1, args.channel - 1)  # Convert to 0-based
     midiout.close_port()
 
 
@@ -384,7 +388,7 @@ def cmd_bank(args):
 
     print(f"Loaded {len(patches)} patches from {args.file}:")
     for i, (name, _) in enumerate(patches):
-        print(f"  {i}: {name}")
+        print(f"  {i + 1}: {name}")
 
     midiout = rtmidi.MidiOut()
     port_idx = find_teensy_port(midiout)
@@ -399,7 +403,7 @@ def cmd_bank(args):
         store_patch_to_slot(midiout, i, tfi)
 
     midiout.close_port()
-    print(f"\nStored {min(len(patches), 16)} patches to slots 0-{min(len(patches), 16)-1}")
+    print(f"\nStored {min(len(patches), 16)} patches to slots 1-{min(len(patches), 16)}")
     print("Use Program Change to select patches")
 
 
@@ -414,7 +418,37 @@ def cmd_list_bank(args):
     patches = load_gyb(args.file)
     print(f"Patches in {args.file}:")
     for i, (name, _) in enumerate(patches):
-        print(f"  {i}: {name}")
+        print(f"  {i + 1}: {name}")
+
+
+def cmd_poly(args):
+    """Switch to poly mode"""
+    midiout = rtmidi.MidiOut()
+    port_idx = find_teensy_port(midiout)
+    if port_idx is None:
+        print("Error: Teensy MIDI port not found")
+        return 1
+
+    midiout.open_port(port_idx)
+    # CC 127 on channel 1 = poly mode (any value works)
+    midiout.send_message([0xB0, 127, 127])
+    midiout.close_port()
+    print("Switched to Poly mode (6-voice polyphonic on MIDI Ch 1)")
+
+
+def cmd_multi(args):
+    """Switch to multi-timbral mode"""
+    midiout = rtmidi.MidiOut()
+    port_idx = find_teensy_port(midiout)
+    if port_idx is None:
+        print("Error: Teensy MIDI port not found")
+        return 1
+
+    midiout.open_port(port_idx)
+    # CC 126 on channel 1 = multi mode (any value works)
+    midiout.send_message([0xB0, 126, 127])
+    midiout.close_port()
+    print("Switched to Multi-timbral mode (6 independent FM channels)")
 
 
 # =============================================================================
@@ -434,19 +468,19 @@ def main():
     # load
     sub = subparsers.add_parser('load', help='Load patch to channel')
     sub.add_argument('file', help='Patch file (TFI or DMP)')
-    sub.add_argument('channel', type=int, choices=range(6), help='FM channel (0-5)')
+    sub.add_argument('channel', type=int, choices=range(1, 7), help='FM channel (1-6)')
     sub.set_defaults(func=cmd_load)
 
     # store
     sub = subparsers.add_parser('store', help='Store patch to slot')
     sub.add_argument('file', help='Patch file (TFI or DMP)')
-    sub.add_argument('slot', type=int, choices=range(16), help='Slot (0-15)')
+    sub.add_argument('slot', type=int, choices=range(1, 17), help='Slot (1-16)')
     sub.set_defaults(func=cmd_store)
 
     # recall
     sub = subparsers.add_parser('recall', help='Recall patch from slot')
-    sub.add_argument('slot', type=int, choices=range(16), help='Slot (0-15)')
-    sub.add_argument('channel', type=int, choices=range(6), help='FM channel (0-5)')
+    sub.add_argument('slot', type=int, choices=range(1, 17), help='Slot (1-16)')
+    sub.add_argument('channel', type=int, choices=range(1, 7), help='FM channel (1-6)')
     sub.set_defaults(func=cmd_recall)
 
     # bank
@@ -464,6 +498,14 @@ def main():
     sub.add_argument('input', help='Input file')
     sub.add_argument('output', help='Output file (TFI)')
     sub.set_defaults(func=cmd_convert)
+
+    # poly
+    sub = subparsers.add_parser('poly', help='Switch to poly mode (6-voice on Ch 1)')
+    sub.set_defaults(func=cmd_poly)
+
+    # multi
+    sub = subparsers.add_parser('multi', help='Switch to multi-timbral mode')
+    sub.set_defaults(func=cmd_multi)
 
     args = parser.parse_args()
 

@@ -175,6 +175,7 @@ void enablePolyMode(uint8_t patchSlot) {
 
     // Load the same patch on all 6 channels
     for (uint8_t ch = 0; ch < 6; ch++) {
+        fmChannelPatch[ch] = patchSlot;  // All channels use same patch
         writeFMPatch(ch, fmPatches[patchSlot]);
         fmState[ch].noteOn = false;
     }
@@ -829,9 +830,17 @@ void handleSysEx(const uint8_t* data, uint16_t len) {
                 uint8_t ch = data[4];
                 if (ch < 6) {
                     parseTFIPatch(&data[5], fmPatches[fmChannelPatch[ch]]);
-                    writeFMPatch(ch, fmPatches[fmChannelPatch[ch]]);
-                    Serial.print("Loaded patch to FM channel ");
-                    Serial.println(ch);
+                    if (synthMode == MODE_POLY6) {
+                        // In poly mode, update all 6 channels with the shared patch
+                        for (uint8_t i = 0; i < 6; i++) {
+                            writeFMPatch(i, fmPatches[fmChannelPatch[ch]]);
+                        }
+                        Serial.println("Loaded patch to all FM channels (poly mode)");
+                    } else {
+                        writeFMPatch(ch, fmPatches[fmChannelPatch[ch]]);
+                        Serial.print("Loaded patch to FM channel ");
+                        Serial.println(ch);
+                    }
                 }
             }
             break;
