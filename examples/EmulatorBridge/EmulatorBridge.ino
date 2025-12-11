@@ -40,22 +40,27 @@
   #define BOARD_TYPE 1  // Uno
   #define BUFFER_SIZE 512
   #define BUFFER_MASK 0x1FF
+  #define BUFFER_FILL_BEFORE_PLAY 384
 #elif defined(__AVR_ATmega2560__)
   #define BOARD_TYPE 2  // Mega
   #define BUFFER_SIZE 2048
   #define BUFFER_MASK 0x7FF
+  #define BUFFER_FILL_BEFORE_PLAY 1536
 #elif defined(__IMXRT1062__)
   #define BOARD_TYPE 4  // Teensy 4.x - 32KB buffer!
   #define BUFFER_SIZE 32768
   #define BUFFER_MASK 0x7FFF
+  #define BUFFER_FILL_BEFORE_PLAY 0
 #elif defined(ESP32)
   #define BOARD_TYPE 5  // ESP32
   #define BUFFER_SIZE 16384
   #define BUFFER_MASK 0x3FFF
+  #define BUFFER_FILL_BEFORE_PLAY 0
 #else
   #define BOARD_TYPE 3  // Other
   #define BUFFER_SIZE 4096
   #define BUFFER_MASK 0xFFF
+  #define BUFFER_FILL_BEFORE_PLAY 1024
 #endif
 
 // =============================================================================
@@ -79,8 +84,13 @@
 
 // Microseconds per sample at 44100 Hz (fixed-point: 22.68us ≈ 23us)
 // For better accuracy: 1000000 / 44100 = 22.6757...
-// We'll use integer math: micros = samples * 1000000 / 44100
-#define SAMPLES_TO_MICROS(s) ((uint32_t)(s) * 1000000UL / 44100UL)
+// AVR: Use fast multiply approximation (division is very slow on 8-bit)
+// Teensy: Use accurate division (fast 32-bit math)
+#if defined(__AVR__)
+  #define SAMPLES_TO_MICROS(s) ((uint32_t)(s) * 23UL)
+#else
+  #define SAMPLES_TO_MICROS(s) ((uint32_t)(s) * 1000000UL / 44100UL)
+#endif
 
 // =============================================================================
 // Pin Configuration
@@ -101,16 +111,28 @@ const uint8_t PIN_SDI  = 8;
 // =============================================================================
 
 volatile uint8_t ringBuffer[BUFFER_SIZE];
-volatile uint32_t ringHead = 0;
-volatile uint32_t ringTail = 0;
 
-inline uint32_t ringAvailable() {
-  return (ringHead - ringTail) & BUFFER_MASK;
-}
-
-inline uint32_t ringFree() {
-  return BUFFER_SIZE - 1 - ringAvailable();
-}
+// AVR: Use 16-bit indices (faster, atomic operations, 2KB max buffer anyway)
+// Teensy: Use 32-bit indices (32KB buffer)
+#if defined(__AVR__)
+  volatile uint16_t ringHead = 0;
+  volatile uint16_t ringTail = 0;
+  inline uint16_t ringAvailable() {
+    return (ringHead - ringTail) & BUFFER_MASK;
+  }
+  inline uint16_t ringFree() {
+    return BUFFER_SIZE - 1 - ringAvailable();
+  }
+#else
+  volatile uint32_t ringHead = 0;
+  volatile uint32_t ringTail = 0;
+  inline uint32_t ringAvailable() {
+    return (ringHead - ringTail) & BUFFER_MASK;
+  }
+  inline uint32_t ringFree() {
+    return BUFFER_SIZE - 1 - ringAvailable();
+  }
+#endif
 
 inline bool ringEmpty() {
   return ringHead == ringTail;
@@ -135,7 +157,7 @@ inline uint8_t ringPeek() {
   return ringBuffer[ringTail];
 }
 
-inline uint8_t ringPeekAt(uint32_t offset) {
+inline uint8_t ringPeekAt(uint16_t offset) {
   return ringBuffer[(ringTail + offset) & BUFFER_MASK];
 }
 
@@ -145,13 +167,17 @@ inline uint8_t ringPeekAt(uint32_t offset) {
 
 GenesisBoard board(PIN_WR_P, PIN_WR_Y, PIN_IC_Y, PIN_A0_Y, PIN_A1_Y, PIN_SCK, PIN_SDI);
 
+// State machine (AVR needs pre-buffering, Teensy doesn't)
+#if BUFFER_FILL_BEFORE_PLAY > 0
+  enum State { WAITING, BUFFERING, PLAYING };
+  State state = WAITING;
+#endif
+
 bool connected = false;
 uint32_t lastActivityTime = 0;
 
-// Timing state for VGM-style wait commands
-// We track accumulated wait time and execute commands when ready
-uint32_t targetTime = 0;        // When we should next allow command execution (micros)
-bool waitPending = false;       // True when we're waiting for targetTime
+// Timing - non-blocking using micros() (same approach as SerialStreaming)
+uint32_t nextCommandTime = 0;
 
 // Timeout: silence chips if no data received (emulator paused/closed)
 #define ACTIVITY_TIMEOUT_MS 1000
@@ -182,15 +208,28 @@ void setup() {
 
 // Forward declarations
 uint8_t getCommandSize(uint8_t cmd);
-bool processOneCommand();
+int32_t processCommand();
 
 void receiveData() {
   // Read all available bytes directly into ring buffer
   while (Serial.available() > 0) {
-    // If buffer is getting full, try to process commands first
+#if BUFFER_FILL_BEFORE_PLAY == 0
+    // Teensy: If buffer is getting full, try to process commands first
     while (ringFree() < 64 && !ringEmpty()) {
-      if (!processOneCommand()) break;  // Waiting for time
+      // Check timing first
+      uint32_t now = micros();
+      if ((int32_t)(now - nextCommandTime) < 0) break;
+
+      int32_t result = processCommand();
+      if (result < 0) break;  // End or need data
+      if (result > 0) {
+        // Wait command - update timing
+        nextCommandTime += SAMPLES_TO_MICROS(result);
+        if ((int32_t)(now - nextCommandTime) > 0) nextCommandTime = now;
+        break;
+      }
     }
+#endif
 
     // CRITICAL: If buffer is still full, STOP reading to prevent overflow!
     // This creates backpressure on the serial port.
@@ -207,8 +246,10 @@ void receiveData() {
       board.reset();
       ringHead = ringTail = 0;
       connected = true;
-      targetTime = micros();    // Reset timing for new connection
-      waitPending = false;      // No wait pending
+      nextCommandTime = 0;      // Will be set when playback starts
+#if BUFFER_FILL_BEFORE_PLAY > 0
+      state = BUFFERING;        // AVR: wait for buffer to fill before playing
+#endif
       Serial.write(CMD_ACK);
       Serial.write(BOARD_TYPE);
       Serial.write(FLOW_READY);
@@ -222,10 +263,10 @@ void receiveData() {
 
 // =============================================================================
 // Command Processing - VGM format from ring buffer
+// Structured like SerialStreaming for proven AVR compatibility
 // =============================================================================
 
 // Get total command size including the command byte itself
-// Returns 0 for unknown commands (we'll skip 1 byte)
 uint8_t getCommandSize(uint8_t cmd) {
   if (cmd >= CMD_WAIT_SHORT_BASE && cmd <= 0x7F) {
     return 1;  // 0x70-0x7F: just the command byte
@@ -234,111 +275,39 @@ uint8_t getCommandSize(uint8_t cmd) {
     case CMD_WAIT_60:
     case CMD_WAIT_50:
     case CMD_END_STREAM:
-      return 1;  // Just command byte
+      return 1;
     case CMD_PSG_WRITE:
-      return 2;  // cmd + value
+      return 2;
     case CMD_WAIT:
-      return 3;  // cmd + 2 bytes sample count
     case CMD_YM2612_PORT0:
     case CMD_YM2612_PORT1:
-      return 3;  // cmd + reg + value
+      return 3;
     default:
-      return 1;  // Unknown - skip 1 byte
+      return 1;
   }
 }
 
-// Process a single command from ring buffer (NON-BLOCKING)
-// VGM format: commands are variable length, wait commands add delays
-// Returns: true if command was processed, false if waiting or no data
-bool processOneCommand() {
-  // If we're waiting for a target time, check if it's time yet
-  if (waitPending) {
-    uint32_t now = micros();
-    int32_t timeRemaining = (int32_t)(targetTime - now);
-    if (timeRemaining > 0) {
-      // Not time yet - keep waiting
-      return false;
-    }
-    waitPending = false;
-  }
-
-  // Need at least 1 byte to peek at command
-  if (ringAvailable() < 1) return false;
+// Process one command - returns wait samples (>0), 0 (continue), -1 (end), -2 (need data)
+int32_t processCommand() {
+  if (ringEmpty()) return -2;
 
   uint8_t cmd = ringPeek();
-  uint8_t cmdSize = getCommandSize(cmd);
+  uint8_t needed = getCommandSize(cmd);
+  if (ringAvailable() < needed) return -2;
 
-  // Wait until we have the full command
-  if (ringAvailable() < cmdSize) return false;
-
-  // Consume the command byte
+  // Consume command byte
   ringRead();
-  lastActivityTime = millis();
 
-  // Handle wait commands - they ACCUMULATE onto targetTime (not reset!)
-  // This prevents drift - timing is based on when commands SHOULD execute,
-  // not when they actually do.
+  // Short waits 0x70-0x7F
   if (cmd >= CMD_WAIT_SHORT_BASE && cmd <= 0x7F) {
-    // Short wait: 0x70 = 1 sample, 0x7F = 16 samples
-    uint8_t samples = (cmd - CMD_WAIT_SHORT_BASE) + 1;
-    targetTime += SAMPLES_TO_MICROS(samples);
-    // If we're behind, snap to now (don't try to catch up - that would play too fast)
-    uint32_t now = micros();
-    if ((int32_t)(now - targetTime) > 0) {
-      targetTime = now;
-    }
-    waitPending = true;
-    return true;  // Command processed (wait started)
+    return (cmd & 0x0F) + 1;
   }
 
   switch (cmd) {
-    case CMD_WAIT: {
-      // 16-bit wait: little-endian sample count
-      uint8_t lo = ringRead();
-      uint8_t hi = ringRead();
-      uint16_t samples = ((uint16_t)hi << 8) | lo;
-      targetTime += SAMPLES_TO_MICROS(samples);
-      // Snap to now if behind
-      uint32_t now = micros();
-      if ((int32_t)(now - targetTime) > 0) {
-        targetTime = now;
-      }
-      waitPending = true;
-      return true;
-    }
-
-    case CMD_WAIT_60: {
-      // Wait 735 samples (1/60 sec)
-      targetTime += SAMPLES_TO_MICROS(735);
-      uint32_t now = micros();
-      if ((int32_t)(now - targetTime) > 0) {
-        targetTime = now;
-      }
-      waitPending = true;
-      return true;
-    }
-
-    case CMD_WAIT_50: {
-      // Wait 882 samples (1/50 sec)
-      targetTime += SAMPLES_TO_MICROS(882);
-      uint32_t now = micros();
-      if ((int32_t)(now - targetTime) > 0) {
-        targetTime = now;
-      }
-      waitPending = true;
-      return true;
-    }
-
-    case CMD_END_STREAM:
-      board.reset();
-      waitPending = false;
-      targetTime = micros();
-      return true;
-
     case CMD_PSG_WRITE: {
       uint8_t value = ringRead();
       board.writePSG(value);
-      return true;
+      return 0;
     }
 
     case CMD_YM2612_PORT0: {
@@ -349,29 +318,80 @@ bool processOneCommand() {
       } else {
         board.writeYM2612(0, reg, value);
       }
-      return true;
+      return 0;
     }
 
     case CMD_YM2612_PORT1: {
       uint8_t reg = ringRead();
       uint8_t value = ringRead();
       board.writeYM2612(1, reg, value);
-      return true;
+      return 0;
     }
 
+    case CMD_WAIT: {
+      uint8_t lo = ringRead();
+      uint8_t hi = ringRead();
+      return (uint16_t)(lo | (hi << 8));
+    }
+
+    case CMD_WAIT_60:
+      return 735;
+
+    case CMD_WAIT_50:
+      return 882;
+
+    case CMD_END_STREAM:
+      board.reset();
+      nextCommandTime = micros();
+      return -1;
+
     default:
-      // Unknown command - already consumed 1 byte, continue
-      return true;
+      return 0;
   }
 }
 
-// Process commands that are ready to execute (non-blocking)
-void processCommands() {
-  // Keep processing while commands are ready (returns true)
-  // Stop when waiting for time or no data
-  while (processOneCommand()) {
-    // After each command, check for incoming data
-    receiveData();
+// Process commands until we hit a wait or run out of data
+// Matches SerialStreaming's updatePlayback() structure exactly
+void updatePlayback() {
+  uint8_t cmdCount = 0;
+
+  while (true) {
+    // Check timing FIRST - if not time yet, exit immediately
+    uint32_t now = micros();
+    if ((int32_t)(now - nextCommandTime) < 0) {
+      return;  // Not time yet
+    }
+
+    // Process one command
+    int32_t result = processCommand();
+
+    if (result == -2) {
+      return;  // Need more data
+    }
+
+    if (result == -1) {
+      return;  // End of stream
+    }
+
+    if (result > 0) {
+      // Wait command - schedule next command time
+      uint32_t waitUs = SAMPLES_TO_MICROS(result);
+      nextCommandTime += waitUs;
+
+      // If behind, snap to now (don't try to catch up)
+      if ((int32_t)(now - nextCommandTime) > 0) {
+        nextCommandTime = now;
+      }
+
+      return;  // Exit to let main loop receive more data
+    }
+
+    // result == 0: chip write, continue processing
+    // Check serial periodically to prevent overflow
+    if (++cmdCount >= 16) {
+      receiveData();
+      cmdCount = 0;
+    }
   }
 }
 
@@ -381,16 +401,41 @@ void processCommands() {
 
 void loop() {
   // Detect USB disconnect - reset state so next connection works
+  // Note: Serial.dtr() only available on Teensy with native USB
+#if defined(__IMXRT1062__) || defined(CORE_TEENSY)
   if (connected && !Serial.dtr()) {
     board.reset();
     ringHead = ringTail = 0;
     connected = false;
-    waitPending = false;
   }
+#endif
 
   // Receive data into ring buffer
   receiveData();
 
-  // Process commands from ring buffer
-  processCommands();
+#if BUFFER_FILL_BEFORE_PLAY > 0
+  // AVR: State machine with pre-buffering
+  switch (state) {
+    case WAITING:
+      // Just receive data, waiting for connection
+      break;
+
+    case BUFFERING:
+      // Wait for buffer to fill before starting playback
+      if (ringAvailable() >= BUFFER_FILL_BEFORE_PLAY) {
+        state = PLAYING;
+        nextCommandTime = micros();  // Start timing fresh
+        lastActivityTime = millis();
+      }
+      break;
+
+    case PLAYING:
+      // Process playback (timing critical)
+      updatePlayback();
+      break;
+  }
+#else
+  // Teensy: Process immediately (fast enough)
+  updatePlayback();
+#endif
 }
