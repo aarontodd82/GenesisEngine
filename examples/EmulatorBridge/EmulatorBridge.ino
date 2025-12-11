@@ -380,12 +380,17 @@ void processCommands() {
 // =============================================================================
 
 void loop() {
+  // Detect USB disconnect - reset state so next connection works
+  if (connected && !Serial.dtr()) {
+    board.reset();
+    ringHead = ringTail = 0;
+    connected = false;
+    waitPending = false;
+  }
+
   // Receive data into ring buffer
   receiveData();
 
   // Process commands from ring buffer
   processCommands();
-
-  // Timeout disabled - was killing SEGA sample during ROM load gap
-  // TODO: Need smarter approach for hung notes (maybe only on explicit disconnect?)
 }
