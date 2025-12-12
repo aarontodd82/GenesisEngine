@@ -36,16 +36,18 @@
 #define SERIAL_BAUD 1000000
 
 // Board-specific settings - LARGE buffers for real-time streaming
+// Note: BUFFER_FILL_BEFORE_PLAY = 0 means play immediately (like Teensy)
+// This works well when DAC is disabled (lower data rate)
 #if defined(__AVR_ATmega328P__)
   #define BOARD_TYPE 1  // Uno
   #define BUFFER_SIZE 512
   #define BUFFER_MASK 0x1FF
-  #define BUFFER_FILL_BEFORE_PLAY 384
+  #define BUFFER_FILL_BEFORE_PLAY 0  // Play immediately (no DAC = lower data rate)
 #elif defined(__AVR_ATmega2560__)
   #define BOARD_TYPE 2  // Mega
   #define BUFFER_SIZE 2048
   #define BUFFER_MASK 0x7FF
-  #define BUFFER_FILL_BEFORE_PLAY 1536
+  #define BUFFER_FILL_BEFORE_PLAY 0  // Play immediately (no DAC = lower data rate)
 #elif defined(__IMXRT1062__)
   #define BOARD_TYPE 4  // Teensy 4.x - 32KB buffer!
   #define BUFFER_SIZE 32768
