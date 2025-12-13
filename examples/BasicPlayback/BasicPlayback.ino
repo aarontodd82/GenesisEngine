@@ -63,8 +63,9 @@ void setup() {
   // Enable looping (song will repeat forever)
   player.setLooping(true);
 
-  // Start playback
-  if (player.play(greenhill_vgm, greenhill_vgm_len)) {
+  // Start playback (using chunked API for large files)
+  if (player.playChunked(greenhill_chunks, greenhill_chunk_sizes,
+                         GREENHILL_NUM_CHUNKS, GREENHILL_TOTAL_LEN)) {
     Serial.println(F("Playback started!"));
     Serial.print(F("Duration: "));
     Serial.print(player.getDurationSeconds());
@@ -109,6 +110,7 @@ void loop() {
     delay(2000);
 
     // Restart
-    player.play(greenhill_vgm, greenhill_vgm_len);
+    player.playChunked(greenhill_chunks, greenhill_chunk_sizes,
+                       GREENHILL_NUM_CHUNKS, GREENHILL_TOTAL_LEN);
   }
 }

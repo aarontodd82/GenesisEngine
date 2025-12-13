@@ -55,6 +55,31 @@ bool GenesisEngine::play(const uint8_t* data, size_t length) {
   return success;
 }
 
+bool GenesisEngine::playChunked(const uint8_t* const* chunks, const uint16_t* chunkSizes,
+                                 uint8_t numChunks, uint32_t totalLength) {
+  // Stop any current playback
+  stop();
+
+  // Set up chunked PROGMEM source
+  chunkedProgmemSource_.setData(chunks, chunkSizes, numChunks, totalLength);
+
+  if (!chunkedProgmemSource_.open()) {
+    GENESIS_DEBUG_PRINTLN("Failed to open chunked PROGMEM source");
+    return false;
+  }
+
+  parser_.setSource(&chunkedProgmemSource_);
+
+  bool success = startPlayback();
+
+  // After parsing header, set data start offset so seek positions are relative
+  if (success) {
+    chunkedProgmemSource_.setDataStart(parser_.getDataOffset());
+  }
+
+  return success;
+}
+
 bool GenesisEngine::startPlayback() {
   // Parse header
   if (!parser_.parseHeader()) {

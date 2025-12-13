@@ -8,6 +8,7 @@
 #include "VGMParser.h"
 #include "sources/VGMSource.h"
 #include "sources/ProgmemSource.h"
+#include "sources/ChunkedProgmemSource.h"
 #if GENESIS_ENGINE_USE_SD
 #include "sources/SDSource.h"
 #endif
@@ -46,6 +47,15 @@ public:
   // length: size of data in bytes
   // Returns true if playback started successfully
   bool play(const uint8_t* data, size_t length);
+
+  // Play VGM from chunked PROGMEM data (for AVR large files)
+  // chunks: PROGMEM array of pointers to chunk arrays
+  // chunkSizes: PROGMEM array of chunk sizes (uint16_t)
+  // numChunks: number of chunks
+  // totalLength: total size across all chunks
+  // Returns true if playback started successfully
+  bool playChunked(const uint8_t* const* chunks, const uint16_t* chunkSizes,
+                   uint8_t numChunks, uint32_t totalLength);
 
   // Stop playback
   void stop();
@@ -129,6 +139,7 @@ private:
 
   // Sources
   ProgmemSource progmemSource_;
+  ChunkedProgmemSource chunkedProgmemSource_;
 #if GENESIS_ENGINE_USE_SD
   SDSource sdSource_;
 #endif
