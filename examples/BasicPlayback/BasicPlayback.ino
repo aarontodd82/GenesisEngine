@@ -21,7 +21,7 @@
 #include <GenesisEngine.h>
 
 // Include your converted VGM file here
-#include "sonic_gg.h"
+#include "greenhill.h"
 
 // =============================================================================
 // Pin Configuration
@@ -64,7 +64,7 @@ void setup() {
   player.setLooping(true);
 
   // Start playback
-  if (player.play(sonic_gg_vgm, sonic_gg_vgm_len)) {
+  if (player.play(greenhill_vgm, greenhill_vgm_len)) {
     Serial.println(F("Playback started!"));
     Serial.print(F("Duration: "));
     Serial.print(player.getDurationSeconds());
@@ -109,6 +109,6 @@ void loop() {
     delay(2000);
 
     // Restart
-    player.play(sonic_gg_vgm, sonic_gg_vgm_len);
+    player.play(greenhill_vgm, greenhill_vgm_len);
   }
 }

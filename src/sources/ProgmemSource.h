@@ -11,13 +11,20 @@
 
 class ProgmemSource : public VGMSource {
 public:
-  ProgmemSource() : data_(nullptr), length_(0), pos_(0), isOpen_(false) {}
+  ProgmemSource() : data_(nullptr), length_(0), pos_(0), dataStartOffset_(0), isOpen_(false) {}
 
   // Set the PROGMEM data to read from
   void setData(const uint8_t* data, size_t length) {
     data_ = data;
     length_ = length;
     pos_ = 0;
+    dataStartOffset_ = 0;
+  }
+
+  // Set the data start offset (called after parsing VGM header)
+  // After this, seek positions are relative to data start
+  void setDataStart(uint32_t dataOffset) {
+    dataStartOffset_ = dataOffset;
   }
 
   // -------------------------------------------------------------------------
@@ -76,10 +83,12 @@ public:
   }
 
   bool seek(uint32_t position) override {
-    if (position > length_) {
+    // If dataStartOffset_ is set, seek positions are relative to data start
+    uint32_t absolutePos = dataStartOffset_ + position;
+    if (absolutePos > length_) {
       return false;
     }
-    pos_ = position;
+    pos_ = absolutePos;
     return true;
   }
 
@@ -99,6 +108,7 @@ private:
   const uint8_t* data_;
   size_t length_;
   size_t pos_;
+  uint32_t dataStartOffset_;  // Offset to VGM data start (for relative seeking)
   bool isOpen_;
 };
 

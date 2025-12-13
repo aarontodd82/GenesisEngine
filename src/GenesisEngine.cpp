@@ -45,7 +45,14 @@ bool GenesisEngine::play(const uint8_t* data, size_t length) {
 
   parser_.setSource(&progmemSource_);
 
-  return startPlayback();
+  bool success = startPlayback();
+
+  // After parsing header, set data start offset so seek positions are relative
+  if (success) {
+    progmemSource_.setDataStart(parser_.getDataOffset());
+  }
+
+  return success;
 }
 
 bool GenesisEngine::startPlayback() {
