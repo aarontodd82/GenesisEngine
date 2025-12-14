@@ -1,16 +1,34 @@
 /**
  * MIDISynth - MIDI Synthesizer for GenesisEngine
  *
- * Turns the GenesisEngine hardware into a USB MIDI synthesizer.
+ * Turns the GenesisEngine hardware into a MIDI synthesizer.
  *
  * MIDI Channel Mapping:
  *   Ch 1-6:  YM2612 FM channels 1-6
  *   Ch 7-9:  SN76489 PSG tone channels 1-3
  *   Ch 10:   SN76489 PSG noise channel
  *
- * Requires: Teensy 4.x with USB Type set to "Serial + MIDI"
- *           (Tools -> USB Type -> Serial + MIDI)
+ * Supported Platforms:
+ *   - Teensy 4.x: USB MIDI (set USB Type to "Serial + MIDI")
+ *   - Arduino Uno/Mega: Serial MIDI via companion app
+ *   - Any board: Serial MIDI at 115200 baud
+ *
+ * Both USB MIDI and Serial MIDI can be used simultaneously on Teensy.
  */
+
+// =============================================================================
+// Platform Detection
+// =============================================================================
+
+// Detect if USB MIDI is available (Teensy with MIDI enabled)
+#if defined(USBCON) && defined(TEENSYDUINO)
+    #define HAS_USB_MIDI 1
+#else
+    #define HAS_USB_MIDI 0
+#endif
+
+// Firmware version for identification
+#define FIRMWARE_VERSION 1
 
 #include <GenesisBoard.h>
 #include "FMPatch.h"
@@ -76,12 +94,16 @@ uint8_t polyPatchSlot = 0;  // Patch slot used in poly mode
 
 struct FMChannelState {
     bool noteOn;
+    bool sustainPending;  // Note should release when sustain pedal is lifted
     uint8_t currentNote;
     uint8_t velocity;
     uint32_t timestamp;  // For voice stealing (when note started)
 };
 
 FMChannelState fmState[6] = {0};
+
+// Sustain pedal state per channel (for multi mode) or global (for poly mode)
+bool sustainPedal[16] = {false};
 
 // Pitch bend per FM channel (-8192 to +8191)
 // In poly mode, all voices share the pitch bend from channel 0
@@ -103,6 +125,30 @@ void fmNoteOn(uint8_t ch, uint8_t note, uint8_t velocity);
 void fmNoteOff(uint8_t ch, uint8_t note);
 void fmKeyOff(uint8_t ch);
 void writeFMPatch(uint8_t ch, const FMPatch& patch);
+void processSerialMIDI();
+void handleSerialMIDIByte(uint8_t byte);
+
+// =============================================================================
+// Serial MIDI Parser State
+// =============================================================================
+
+// MIDI message types for parsing
+#define MIDI_NOTE_OFF       0x80
+#define MIDI_NOTE_ON        0x90
+#define MIDI_POLY_PRESSURE  0xA0
+#define MIDI_CONTROL_CHANGE 0xB0
+#define MIDI_PROGRAM_CHANGE 0xC0
+#define MIDI_CHAN_PRESSURE  0xD0
+#define MIDI_PITCH_BEND     0xE0
+#define MIDI_SYSEX_START    0xF0
+#define MIDI_SYSEX_END      0xF7
+
+// Serial MIDI parser state
+uint8_t serialMidiBuffer[128];   // Buffer for incoming MIDI data
+uint8_t serialMidiPos = 0;       // Current position in buffer
+uint8_t serialMidiExpected = 0;  // Expected message length
+uint8_t serialMidiStatus = 0;    // Running status byte
+bool serialInSysEx = false;      // Currently receiving SysEx
 
 // =============================================================================
 // Voice Allocator (for Poly Mode)
@@ -230,17 +276,34 @@ void setup() {
 // =============================================================================
 
 void loop() {
-    // Process USB MIDI from computer
+    // Process USB MIDI from computer (Teensy only)
+    #if HAS_USB_MIDI
     while (usbMIDI.read()) {
+        // Convert usbMIDI type to our unified type constants
+        uint8_t type = usbMIDI.getType();
+        uint8_t unifiedType;
+        switch (type) {
+            case usbMIDI.NoteOff:         unifiedType = TYPE_NOTE_OFF; break;
+            case usbMIDI.NoteOn:          unifiedType = TYPE_NOTE_ON; break;
+            case usbMIDI.ControlChange:   unifiedType = TYPE_CONTROL_CHANGE; break;
+            case usbMIDI.ProgramChange:   unifiedType = TYPE_PROGRAM_CHANGE; break;
+            case usbMIDI.PitchBend:       unifiedType = TYPE_PITCH_BEND; break;
+            case usbMIDI.SystemExclusive: unifiedType = TYPE_SYSEX; break;
+            default: continue;  // Skip unknown types
+        }
         handleMIDI(
-            usbMIDI.getType(),
-            usbMIDI.getChannel(),
+            unifiedType,
+            usbMIDI.getChannel() - 1,  // Convert to 0-indexed
             usbMIDI.getData1(),
             usbMIDI.getData2(),
             usbMIDI.getSysExArray(),
             usbMIDI.getSysExArrayLength()
         );
     }
+    #endif
+
+    // Process Serial MIDI (all platforms - from companion app)
+    processSerialMIDI();
 
     // Update PSG envelopes at 60Hz
     uint32_t now = micros();
@@ -251,17 +314,27 @@ void loop() {
 }
 
 // =============================================================================
-// MIDI Handler
+// MIDI Handler (unified for USB and Serial MIDI)
 // =============================================================================
+
+// MIDI type constants (compatible with both usbMIDI and serial parsing)
+#define TYPE_NOTE_OFF       0x08
+#define TYPE_NOTE_ON        0x09
+#define TYPE_POLY_PRESSURE  0x0A
+#define TYPE_CONTROL_CHANGE 0x0B
+#define TYPE_PROGRAM_CHANGE 0x0C
+#define TYPE_CHAN_PRESSURE  0x0D
+#define TYPE_PITCH_BEND     0x0E
+#define TYPE_SYSEX          0x0F
 
 void handleMIDI(uint8_t type, uint8_t channel, uint8_t d1, uint8_t d2,
                 const uint8_t* sysex, uint16_t sysexLen) {
 
-    // MIDI channels are 1-indexed in the library
-    uint8_t ch = channel - 1;
+    // Channel is 0-indexed here (convert from 1-indexed if needed by caller)
+    uint8_t ch = channel;
 
     switch (type) {
-        case usbMIDI.NoteOn:
+        case TYPE_NOTE_ON:
             if (d2 > 0) {
                 noteOn(ch, d1, d2);
             } else {
@@ -269,23 +342,23 @@ void handleMIDI(uint8_t type, uint8_t channel, uint8_t d1, uint8_t d2,
             }
             break;
 
-        case usbMIDI.NoteOff:
+        case TYPE_NOTE_OFF:
             noteOff(ch, d1);
             break;
 
-        case usbMIDI.ControlChange:
+        case TYPE_CONTROL_CHANGE:
             handleCC(ch, d1, d2);
             break;
 
-        case usbMIDI.ProgramChange:
+        case TYPE_PROGRAM_CHANGE:
             handleProgramChange(ch, d1);
             break;
 
-        case usbMIDI.PitchBend:
+        case TYPE_PITCH_BEND:
             handlePitchBend(ch, (d2 << 7) | d1);
             break;
 
-        case usbMIDI.SystemExclusive:
+        case TYPE_SYSEX:
             if (sysex && sysexLen > 0) {
                 handleSysEx(sysex, sysexLen);
             }
@@ -378,8 +451,16 @@ void fmNoteOn(uint8_t ch, uint8_t note, uint8_t velocity) {
 void fmNoteOff(uint8_t ch, uint8_t note) {
     // Only release if this is the note that's playing
     if (fmState[ch].noteOn && fmState[ch].currentNote == note) {
-        fmState[ch].noteOn = false;
-        fmKeyOff(ch);
+        // Check sustain pedal - in poly mode use ch 0, in multi mode use the actual channel
+        uint8_t sustainCh = (synthMode == MODE_POLY6) ? 0 : ch;
+        if (sustainPedal[sustainCh]) {
+            // Mark as pending release instead of actually releasing
+            fmState[ch].sustainPending = true;
+        } else {
+            fmState[ch].noteOn = false;
+            fmState[ch].sustainPending = false;
+            fmKeyOff(ch);
+        }
     }
 }
 
@@ -598,6 +679,16 @@ void updatePSGEnvelopes() {
 // LFO enabled state
 bool lfoEnabled = false;
 
+/**
+ * Echo a CC to serial so companion app can update its UI
+ * This ensures the app always reflects the actual hardware state
+ */
+void echoCC(uint8_t ch, uint8_t cc, uint8_t value) {
+    Serial.write(0xB0 | (ch & 0x0F));
+    Serial.write(cc & 0x7F);
+    Serial.write(value & 0x7F);
+}
+
 void handleCC(uint8_t ch, uint8_t cc, uint8_t value) {
     // Mode switching CCs work on any channel
     switch (cc) {
@@ -648,6 +739,7 @@ void handleCC(uint8_t ch, uint8_t cc, uint8_t value) {
                     uint8_t chReg = ch % 3;
                     board.writeYM2612(port, 0xB4 + chReg, 0xC0 | pms);
                 }
+                echoCC(ch, cc, value);
             }
             break;
 
@@ -665,6 +757,7 @@ void handleCC(uint8_t ch, uint8_t cc, uint8_t value) {
                     FMPatch& patch = fmPatches[fmChannelPatch[ch]];
                     applyVolumeAttenuation(ch, patch, attenuation);
                 }
+                echoCC(ch, cc, value);
             }
             break;
 
@@ -675,6 +768,7 @@ void handleCC(uint8_t ch, uint8_t cc, uint8_t value) {
                 else if (value > 96) pan = 0x40; // Right only
                 else pan = 0xC0;                  // Center (both)
                 setFMPanning(ch, pan);
+                echoCC(ch, cc, value);
             }
             break;
 
@@ -682,6 +776,7 @@ void handleCC(uint8_t ch, uint8_t cc, uint8_t value) {
             if (value < 8) {
                 fmPatches[fmChannelPatch[ch]].algorithm = value;
                 writeFMPatch(ch, fmPatches[fmChannelPatch[ch]]);
+                echoCC(ch, cc, value);
             }
             break;
 
@@ -689,6 +784,7 @@ void handleCC(uint8_t ch, uint8_t cc, uint8_t value) {
             if (value < 8) {
                 fmPatches[fmChannelPatch[ch]].feedback = value;
                 writeFMPatch(ch, fmPatches[fmChannelPatch[ch]]);
+                echoCC(ch, cc, value);
             }
             break;
 
@@ -698,7 +794,21 @@ void handleCC(uint8_t ch, uint8_t cc, uint8_t value) {
                 uint8_t op = cc - 16;
                 fmPatches[fmChannelPatch[ch]].op[op].tl = value;
                 writeOperatorTL(ch, op, value);
+                echoCC(ch, cc, value);
             }
+            break;
+
+        case 64:  // Sustain pedal
+            handleSustainPedal(ch, value >= 64);
+            echoCC(ch, cc, value);
+            break;
+
+        case 120: // All Sound Off - immediately silence
+            allSoundOff(ch);
+            break;
+
+        case 123: // All Notes Off - release all held notes
+            allNotesOff(ch);
             break;
     }
 }
@@ -708,6 +818,94 @@ void writeOperatorTL(uint8_t ch, uint8_t op, uint8_t tl) {
     uint8_t chReg = ch % 3;
     const uint8_t opOffsets[4] = {0, 8, 4, 12};
     board.writeYM2612(port, 0x40 + opOffsets[op] + chReg, tl);
+}
+
+// =============================================================================
+// Sustain Pedal & Panic Functions
+// =============================================================================
+
+void handleSustainPedal(uint8_t ch, bool on) {
+    sustainPedal[ch] = on;
+
+    if (!on) {
+        // Pedal released - release any notes marked as sustainPending
+        if (synthMode == MODE_POLY6 && ch == 0) {
+            // In poly mode, sustain on ch 0 affects all 6 voices
+            for (uint8_t i = 0; i < 6; i++) {
+                if (fmState[i].sustainPending) {
+                    fmState[i].noteOn = false;
+                    fmState[i].sustainPending = false;
+                    fmKeyOff(i);
+                }
+            }
+        } else if (synthMode == MODE_MULTI && ch < 6) {
+            // In multi mode, each FM channel has its own sustain
+            if (fmState[ch].sustainPending) {
+                fmState[ch].noteOn = false;
+                fmState[ch].sustainPending = false;
+                fmKeyOff(ch);
+            }
+        }
+        // PSG doesn't support sustain pedal
+    }
+}
+
+void allNotesOff(uint8_t ch) {
+    // Release all notes on this channel (or all channels if ch >= 16)
+    if (ch < 6 || ch >= 16) {
+        // FM channels
+        uint8_t start = (ch >= 16) ? 0 : ch;
+        uint8_t end = (ch >= 16) ? 6 : ch + 1;
+        for (uint8_t i = start; i < end; i++) {
+            if (fmState[i].noteOn) {
+                fmState[i].noteOn = false;
+                fmState[i].sustainPending = false;
+                fmKeyOff(i);
+            }
+        }
+    }
+
+    if ((ch >= 6 && ch < 10) || ch >= 16) {
+        // PSG channels
+        uint8_t start = (ch >= 16) ? 0 : ch - 6;
+        uint8_t end = (ch >= 16) ? 3 : start + 1;
+        for (uint8_t i = start; i < end; i++) {
+            psgNoteOff(i);
+        }
+        if (ch == 9 || ch >= 16) {
+            psgNoiseOff();
+        }
+    }
+}
+
+void allSoundOff(uint8_t ch) {
+    // Immediately silence - same as allNotesOff but more aggressive
+    // Could also reset controllers, but for now just do notes off
+    allNotesOff(ch);
+
+    // Additionally mute FM TL to max attenuation for immediate silence
+    if (ch < 6 || ch >= 16) {
+        uint8_t start = (ch >= 16) ? 0 : ch;
+        uint8_t end = (ch >= 16) ? 6 : ch + 1;
+        for (uint8_t i = start; i < end; i++) {
+            // Set all operator TLs to max attenuation (127 = silent)
+            for (uint8_t op = 0; op < 4; op++) {
+                writeOperatorTL(i, op, 127);
+            }
+        }
+    }
+
+    if ((ch >= 6 && ch < 10) || ch >= 16) {
+        // PSG - set to max attenuation (15 = silent)
+        uint8_t start = (ch >= 16) ? 0 : ch - 6;
+        uint8_t end = (ch >= 16) ? 3 : start + 1;
+        for (uint8_t i = start; i < end; i++) {
+            board.writePSG(0x90 | (i << 5) | 0x0F);
+        }
+        if (ch == 9 || ch >= 16) {
+            board.writePSG(0x90 | (3 << 5) | 0x0F);  // Noise channel
+        }
+    }
 }
 
 // =============================================================================
@@ -809,11 +1007,61 @@ void setFMFrequencyWithBend(uint8_t ch, uint8_t note, int16_t bend) {
 // =============================================================================
 
 // SysEx format: F0 7D 00 <cmd> <data...> F7
-// Commands:
+// Commands (Host -> Device):
 //   0x01 = Load FM patch to channel: <channel> <42 bytes>
 //   0x02 = Load PSG envelope: <channel> <length> <loopStart> <data...>
 //   0x03 = Store FM patch to slot: <slot> <42 bytes>
 //   0x04 = Recall FM patch to channel: <channel> <slot>
+//   0x10 = Request patch dump: <slot>
+//   0x11 = Request all patches
+//   0x12 = Set synth mode: <mode> (0=Multi, 1=Poly)
+//   0x13 = Ping/identify
+//
+// Responses (Device -> Host):
+//   0x80 = Patch dump: <slot> <42 bytes>
+//   0x81 = Identity: <mode> <version>
+
+void sendSysExResponse(uint8_t cmd, const uint8_t* data, uint8_t len) {
+    Serial.write(0xF0);
+    Serial.write(0x7D);
+    Serial.write(0x00);
+    Serial.write(cmd);
+    for (uint8_t i = 0; i < len; i++) {
+        Serial.write(data[i]);
+    }
+    Serial.write(0xF7);
+}
+
+void sendPatchDump(uint8_t slot) {
+    if (slot >= 16) return;
+
+    uint8_t data[46];  // slot + 45 bytes extended patch
+    data[0] = slot;
+
+    // Serialize patch to extended format (45 bytes)
+    const FMPatch& patch = fmPatches[slot];
+    data[1] = patch.algorithm;
+    data[2] = patch.feedback;
+    for (int op = 0; op < 4; op++) {
+        int offset = 3 + op * 10;
+        data[offset + 0] = patch.op[op].mul;
+        data[offset + 1] = patch.op[op].dt;
+        data[offset + 2] = patch.op[op].tl;
+        data[offset + 3] = patch.op[op].rs;
+        data[offset + 4] = patch.op[op].ar;
+        data[offset + 5] = patch.op[op].dr;
+        data[offset + 6] = patch.op[op].sr;
+        data[offset + 7] = patch.op[op].rr;
+        data[offset + 8] = patch.op[op].sl;
+        data[offset + 9] = patch.op[op].ssg;
+    }
+    // Extended parameters
+    data[43] = patch.pan;
+    data[44] = patch.ams;
+    data[45] = patch.pms;
+
+    sendSysExResponse(0x80, data, 46);
+}
 
 void handleSysEx(const uint8_t* data, uint16_t len) {
     // Minimum: F0 7D 00 cmd F7 = 5 bytes
@@ -826,20 +1074,19 @@ void handleSysEx(const uint8_t* data, uint16_t len) {
 
     switch (cmd) {
         case 0x01:  // Load FM patch to channel
-            if (len >= 5 + 1 + 42) {  // cmd + channel + patch
+            // Accept both legacy (42-byte) and extended (45-byte) formats
+            if (len >= 5 + 1 + FM_PATCH_SIZE_LEGACY) {  // cmd + channel + patch
                 uint8_t ch = data[4];
                 if (ch < 6) {
-                    parseTFIPatch(&data[5], fmPatches[fmChannelPatch[ch]]);
+                    bool extended = (len >= 5 + 1 + FM_PATCH_SIZE_EXTENDED);
+                    parsePatchData(&data[5], fmPatches[fmChannelPatch[ch]], extended);
                     if (synthMode == MODE_POLY6) {
                         // In poly mode, update all 6 channels with the shared patch
                         for (uint8_t i = 0; i < 6; i++) {
                             writeFMPatch(i, fmPatches[fmChannelPatch[ch]]);
                         }
-                        Serial.println("Loaded patch to all FM channels (poly mode)");
                     } else {
                         writeFMPatch(ch, fmPatches[fmChannelPatch[ch]]);
-                        Serial.print("Loaded patch to FM channel ");
-                        Serial.println(ch);
                     }
                 }
             }
@@ -855,19 +1102,17 @@ void handleSysEx(const uint8_t* data, uint16_t len) {
                     env.length = envLen;
                     env.loopStart = loopStart;
                     memcpy(env.data, &data[7], envLen);
-                    Serial.print("Loaded envelope to PSG channel ");
-                    Serial.println(ch);
                 }
             }
             break;
 
         case 0x03:  // Store FM patch to slot
-            if (len >= 5 + 1 + 42) {
+            // Accept both legacy (42-byte) and extended (45-byte) formats
+            if (len >= 5 + 1 + FM_PATCH_SIZE_LEGACY) {
                 uint8_t slot = data[4];
                 if (slot < 16) {
-                    parseTFIPatch(&data[5], fmPatches[slot]);
-                    Serial.print("Stored patch to slot ");
-                    Serial.println(slot);
+                    bool extended = (len >= 5 + 1 + FM_PATCH_SIZE_EXTENDED);
+                    parsePatchData(&data[5], fmPatches[slot], extended);
                 }
             }
             break;
@@ -879,11 +1124,40 @@ void handleSysEx(const uint8_t* data, uint16_t len) {
                 if (ch < 6 && slot < 16) {
                     fmChannelPatch[ch] = slot;
                     writeFMPatch(ch, fmPatches[slot]);
-                    Serial.print("Recalled slot ");
-                    Serial.print(slot);
-                    Serial.print(" to channel ");
-                    Serial.println(ch);
                 }
+            }
+            break;
+
+        case 0x10:  // Request patch dump
+            if (len >= 5 + 1) {
+                uint8_t slot = data[4];
+                sendPatchDump(slot);
+            }
+            break;
+
+        case 0x11:  // Request all patches
+            for (uint8_t i = 0; i < 16; i++) {
+                sendPatchDump(i);
+            }
+            break;
+
+        case 0x12:  // Set synth mode
+            if (len >= 5 + 1) {
+                uint8_t mode = data[4];
+                if (mode == 0) {
+                    enableMultiMode();
+                } else {
+                    enablePolyMode(polyPatchSlot);
+                }
+            }
+            break;
+
+        case 0x13:  // Ping/identify
+            {
+                uint8_t response[2];
+                response[0] = (synthMode == MODE_POLY6) ? 1 : 0;
+                response[1] = FIRMWARE_VERSION;
+                sendSysExResponse(0x81, response, 2);
             }
             break;
     }
@@ -893,7 +1167,9 @@ void handleSysEx(const uint8_t* data, uint16_t len) {
 // Patch Loading
 // =============================================================================
 
-void parseTFIPatch(const uint8_t* data, FMPatch& patch) {
+// Parse patch from SysEx data
+// Supports both legacy 42-byte (TFI) and extended 45-byte formats
+void parsePatchData(const uint8_t* data, FMPatch& patch, bool extended) {
     patch.algorithm = data[0];
     patch.feedback = data[1];
 
@@ -910,6 +1186,23 @@ void parseTFIPatch(const uint8_t* data, FMPatch& patch) {
         patch.op[op].sl = opData[8];
         patch.op[op].ssg = opData[9];
     }
+
+    // Extended format includes pan/ams/pms
+    if (extended) {
+        patch.pan = data[42];
+        patch.ams = data[43];
+        patch.pms = data[44];
+    } else {
+        // Default to center, no LFO
+        patch.pan = PAN_CENTER;
+        patch.ams = 0;
+        patch.pms = 0;
+    }
+}
+
+// Legacy wrapper for backward compatibility
+void parseTFIPatch(const uint8_t* data, FMPatch& patch) {
+    parsePatchData(data, patch, false);
 }
 
 void writeFMPatch(uint8_t ch, const FMPatch& patch) {
@@ -918,6 +1211,9 @@ void writeFMPatch(uint8_t ch, const FMPatch& patch) {
 
     // Write algorithm and feedback
     board.writeYM2612(port, 0xB0 + chReg, (patch.feedback << 3) | patch.algorithm);
+
+    // Write L/R/AMS/PMS (pan and LFO sensitivity) - part of the complete voice
+    board.writeYM2612(port, 0xB4 + chReg, patch.getLRAMSPMS());
 
     // Operator register offsets: S1=0, S3=8, S2=4, S4=12
     // TFI stores in order: S1, S3, S2, S4 (indices 0, 1, 2, 3)
@@ -949,5 +1245,116 @@ void loadDefaultPatches() {
     // Load default PSG envelopes from PROGMEM
     for (int i = 0; i < DEFAULT_PSG_ENV_COUNT && i < 8; i++) {
         memcpy_P(&psgEnvelopes[i], &defaultPSGEnvelopes[i], sizeof(PSGEnvelope));
+    }
+}
+
+// =============================================================================
+// Serial MIDI Parser
+// =============================================================================
+
+// Get expected data byte count for a MIDI status byte
+uint8_t getMIDIMessageLength(uint8_t status) {
+    uint8_t type = status & 0xF0;
+    switch (type) {
+        case MIDI_NOTE_OFF:
+        case MIDI_NOTE_ON:
+        case MIDI_POLY_PRESSURE:
+        case MIDI_CONTROL_CHANGE:
+        case MIDI_PITCH_BEND:
+            return 2;  // Two data bytes
+        case MIDI_PROGRAM_CHANGE:
+        case MIDI_CHAN_PRESSURE:
+            return 1;  // One data byte
+        default:
+            return 0;  // System messages handled separately
+    }
+}
+
+void processSerialMIDI() {
+    while (Serial.available()) {
+        uint8_t byte = Serial.read();
+        handleSerialMIDIByte(byte);
+    }
+}
+
+void handleSerialMIDIByte(uint8_t byte) {
+    // Handle SysEx
+    if (serialInSysEx) {
+        if (byte == MIDI_SYSEX_END) {
+            // End of SysEx - process it
+            serialMidiBuffer[serialMidiPos++] = byte;
+            handleMIDI(TYPE_SYSEX, 0, 0, 0, serialMidiBuffer, serialMidiPos);
+            serialInSysEx = false;
+            serialMidiPos = 0;
+        } else if (byte >= 0x80) {
+            // Unexpected status byte - abort SysEx
+            serialInSysEx = false;
+            serialMidiPos = 0;
+            // Fall through to handle this as a new message
+            if (byte != MIDI_SYSEX_START) {
+                handleSerialMIDIByte(byte);  // Recursive call for new status
+            }
+        } else {
+            // SysEx data byte
+            if (serialMidiPos < sizeof(serialMidiBuffer)) {
+                serialMidiBuffer[serialMidiPos++] = byte;
+            }
+        }
+        return;
+    }
+
+    // Check for status byte (high bit set)
+    if (byte >= 0x80) {
+        if (byte == MIDI_SYSEX_START) {
+            // Start of SysEx
+            serialInSysEx = true;
+            serialMidiPos = 0;
+            serialMidiBuffer[serialMidiPos++] = byte;
+            return;
+        }
+
+        if (byte >= 0xF0) {
+            // System real-time or common messages - ignore most
+            return;
+        }
+
+        // Channel voice message - store as running status
+        serialMidiStatus = byte;
+        serialMidiExpected = getMIDIMessageLength(byte);
+        serialMidiPos = 0;
+        return;
+    }
+
+    // Data byte
+    if (serialMidiStatus == 0) {
+        // No running status - ignore
+        return;
+    }
+
+    // Store data byte
+    serialMidiBuffer[serialMidiPos++] = byte;
+
+    // Check if message is complete
+    if (serialMidiPos >= serialMidiExpected) {
+        // Process complete message
+        uint8_t channel = serialMidiStatus & 0x0F;
+        uint8_t d1 = serialMidiBuffer[0];
+        uint8_t d2 = (serialMidiExpected > 1) ? serialMidiBuffer[1] : 0;
+
+        // Convert status nibble to our type constants
+        uint8_t unifiedType;
+        switch (serialMidiStatus & 0xF0) {
+            case MIDI_NOTE_OFF:       unifiedType = TYPE_NOTE_OFF; break;
+            case MIDI_NOTE_ON:        unifiedType = TYPE_NOTE_ON; break;
+            case MIDI_CONTROL_CHANGE: unifiedType = TYPE_CONTROL_CHANGE; break;
+            case MIDI_PROGRAM_CHANGE: unifiedType = TYPE_PROGRAM_CHANGE; break;
+            case MIDI_PITCH_BEND:     unifiedType = TYPE_PITCH_BEND; break;
+            default: return;  // Unsupported type
+        }
+
+        handleMIDI(unifiedType, channel, d1, d2, nullptr, 0);
+
+        // Reset for next message (keep running status)
+        serialMidiPos = 0;
     }
 }
