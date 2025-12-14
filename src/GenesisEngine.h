@@ -124,6 +124,9 @@ public:
   // Check if file has a loop point
   bool hasLoop() const { return parser_.hasLoop(); }
 
+  // Get number of times the file has looped (0 = first play through)
+  uint16_t getLoopCount() const { return parser_.getLoopCount(); }
+
 #if GENESIS_ENGINE_USE_SD
   // -------------------------------------------------------------------------
   // SD Card Playback (if available)

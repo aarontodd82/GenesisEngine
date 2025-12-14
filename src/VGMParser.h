@@ -47,7 +47,11 @@ public:
   bool hasLoop() const { return hasLoop_; }
 
   // Seek to loop point (call when end is reached and looping is desired)
+  // Increments the loop counter each time it's called
   bool seekToLoop();
+
+  // Get number of times the file has looped (0 = first play through)
+  uint16_t getLoopCount() const { return loopCount_; }
 
   // -------------------------------------------------------------------------
   // File Information
@@ -96,6 +100,7 @@ private:
 
   // Playback state
   bool finished_;
+  uint16_t loopCount_;  // Number of times seekToLoop() has been called
 
   // PSG attenuation for FM+PSG mix (reduces PSG volume when both chips present)
   uint8_t psgAttenuation_;  // 0 = no attenuation, 2 = typical for FM+PSG mix

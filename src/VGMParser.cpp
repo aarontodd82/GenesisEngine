@@ -17,6 +17,7 @@ VGMParser::VGMParser(GenesisBoard& board)
     hasYM2612_(false),
     hasSN76489_(false),
     finished_(true),
+    loopCount_(0),
     psgAttenuation_(0),
     unsupportedCallback_(nullptr)
 {
@@ -131,6 +132,7 @@ bool VGMParser::parseHeader() {
 
 void VGMParser::reset() {
   finished_ = true;
+  loopCount_ = 0;
   psgAttenuation_ = 0;
   pcmDataBank_.clear();
 }
@@ -175,6 +177,7 @@ bool VGMParser::seekToLoop() {
   // VGZSource tracks position relative to data start after setDataStart()
   if (source_->seek(loopOffsetInData_)) {
     finished_ = false;
+    loopCount_++;
     return true;
   }
 

@@ -93,6 +93,30 @@ char fileList[MAX_FILES][MAX_FILENAME_LEN];
 uint8_t fileCount = 0;
 int8_t currentFileIndex = -1;
 
+// Playlist file list (stores names without .txt extension)
+#define MAX_PLAYLISTS 10
+char playlistFiles[MAX_PLAYLISTS][MAX_FILENAME_LEN];
+uint8_t playlistFileCount = 0;
+
+// =============================================================================
+// Playlist Management
+// =============================================================================
+
+#define MAX_PLAYLIST_SIZE MAX_FILES
+
+uint8_t playlistIndices[MAX_PLAYLIST_SIZE];  // Index into fileList for each track
+uint8_t playlistPlays[MAX_PLAYLIST_SIZE];    // How many times to play each track
+uint8_t playlistSize = 0;
+uint8_t playlistPos = 0;
+uint8_t currentPlays = 0;           // How many times current track has played
+uint16_t lastLoopCount = 0;         // Track loop count to detect new loops
+bool playlistShuffle = false;
+bool playlistLoop = false;
+bool playlistActive = false;
+
+// Delay between songs in playlist (milliseconds)
+#define PLAYLIST_SONG_DELAY 750
+
 // Serial command buffer
 #define CMD_BUFFER_SIZE 64
 char cmdBuffer[CMD_BUFFER_SIZE];
@@ -103,6 +127,7 @@ uint8_t cmdPos = 0;
 // =============================================================================
 
 void scanFiles();
+void scanPlaylists();
 void printFileList();
 void playFileByIndex(uint8_t index);
 void playFileByName(const char* name);
@@ -110,6 +135,13 @@ void processCommand(const char* cmd);
 void printHelp();
 void printInfo();
 void printError(const char* msg, const char* detail = nullptr);
+
+// Playlist functions
+bool loadPlaylist(const char* name);
+void startPlaylist();
+void playNextInPlaylist();
+void shufflePlaylist();
+int8_t findFileIndex(const char* name);
 
 // =============================================================================
 // Setup
@@ -153,8 +185,19 @@ void setup() {
   }
   Serial.println(F("OK!"));
 
-  // Scan for VGM files
+  // Scan for VGM files and playlists
   scanFiles();
+  scanPlaylists();
+
+  // Check for auto-start playlist
+  if (SD.exists("/auto.txt")) {
+    Serial.println(F(""));
+    Serial.println(F("Found auto.txt - starting auto playlist..."));
+    if (loadPlaylist("auto")) {
+      startPlaylist();
+      return;  // Skip the prompt
+    }
+  }
 
   Serial.println(F(""));
   Serial.println(F("Type 'help' for commands, 'list' to see files"));
@@ -193,11 +236,43 @@ void loop() {
     }
   }
 
+  // Playlist: monitor for loop events to track play count
+  if (playlistActive && player.isPlaying()) {
+    uint16_t loopCount = player.getLoopCount();
+    if (loopCount > lastLoopCount) {
+      lastLoopCount = loopCount;
+      // A loop occurred - this counts as completing a play
+      uint8_t targetPlays = playlistPlays[playlistPos];
+      currentPlays++;
+      if (currentPlays >= targetPlays) {
+        // Done with this track, advance to next
+        player.stop();
+        playNextInPlaylist();
+      } else {
+        // Still more plays needed
+        Serial.print(F("[Playlist: track "));
+        Serial.print(playlistPos + 1);
+        Serial.print(F("/"));
+        Serial.print(playlistSize);
+        Serial.print(F(", play "));
+        Serial.print(currentPlays + 1);
+        Serial.print(F("/"));
+        Serial.print(targetPlays);
+        Serial.println(F("]"));
+      }
+    }
+  }
+
   // Show status when playback finishes
   static bool wasPlaying = false;
   if (wasPlaying && player.isFinished()) {
-    Serial.println(F("Playback finished"));
-    Serial.print(F("> "));
+    if (playlistActive) {
+      // Playlist mode: advance to next track
+      playNextInPlaylist();
+    } else {
+      Serial.println(F("Playback finished"));
+      Serial.print(F("> "));
+    }
     wasPlaying = false;
   } else if (player.isPlaying()) {
     wasPlaying = true;
@@ -248,44 +323,111 @@ void scanFiles() {
   Serial.println(F(" files found"));
 }
 
+void scanPlaylists() {
+  Serial.print(F("Scanning for playlists... "));
+  playlistFileCount = 0;
+
+  File root = SD.open("/");
+  if (!root) {
+    Serial.println(F("0 found"));
+    return;
+  }
+
+  char line[12];  // Just need to read "#PLAYLIST"
+
+  while (playlistFileCount < MAX_PLAYLISTS) {
+    File entry = root.openNextFile();
+    if (!entry) break;
+
+    if (!entry.isDirectory()) {
+      const char* name = entry.name();
+      size_t len = strlen(name);
+
+      // Check for .txt extension
+      if (len >= 4 && strcasecmp(name + len - 4, ".txt") == 0) {
+        // Check if it starts with #PLAYLIST
+        size_t bytesRead = entry.readBytes(line, 9);
+        line[bytesRead] = '\0';
+
+        if (strcmp(line, "#PLAYLIST") == 0) {
+          // Store name without .txt extension
+          size_t nameLen = len - 4;
+          if (nameLen >= MAX_FILENAME_LEN) nameLen = MAX_FILENAME_LEN - 1;
+          strncpy(playlistFiles[playlistFileCount], name, nameLen);
+          playlistFiles[playlistFileCount][nameLen] = '\0';
+          playlistFileCount++;
+        }
+      }
+    }
+    entry.close();
+  }
+  root.close();
+
+  Serial.print(playlistFileCount);
+  Serial.println(F(" found"));
+}
+
 void printFileList() {
+  Serial.println(F(""));
+
   if (fileCount == 0) {
     Serial.println(F("No VGM files found on SD card"));
-    Serial.println(F(""));
     Serial.println(F("Place .vgm files in the root of the SD card"));
 #if !GENESIS_ENGINE_USE_VGZ
     Serial.println(F("Note: This board only supports .vgm (not .vgz)"));
     Serial.println(F("Use: python tools/vgm_prep.py file.vgz -o file.vgm"));
 #endif
-    return;
-  }
+  } else {
+    Serial.println(F("Songs:"));
+    Serial.println(F("------"));
 
-  Serial.println(F(""));
-  Serial.println(F("Files on SD card:"));
-  Serial.println(F("-----------------"));
+    for (uint8_t i = 0; i < fileCount; i++) {
+      Serial.print(F("  "));
+      if (i < 9) Serial.print(' ');  // Align single digits
+      Serial.print(i + 1);
+      Serial.print(F(". "));
+      Serial.print(fileList[i]);
 
-  for (uint8_t i = 0; i < fileCount; i++) {
-    Serial.print(F("  "));
-    if (i < 9) Serial.print(' ');  // Align single digits
-    Serial.print(i + 1);
-    Serial.print(F(". "));
-    Serial.print(fileList[i]);
+      // Mark currently playing file
+      if (i == currentFileIndex && player.isPlaying()) {
+        Serial.print(F(" [PLAYING]"));
+      }
 
-    // Mark currently playing file
-    if (i == currentFileIndex && player.isPlaying()) {
-      Serial.print(F(" [PLAYING]"));
-    }
-
-    // Warn about VGZ on AVR
+      // Warn about VGZ on AVR
 #if !GENESIS_ENGINE_USE_VGZ
-    size_t len = strlen(fileList[i]);
-    if (len >= 4 && strcasecmp(fileList[i] + len - 4, ".vgz") == 0) {
-      Serial.print(F(" (unsupported)"));
-    }
+      size_t len = strlen(fileList[i]);
+      if (len >= 4 && strcasecmp(fileList[i] + len - 4, ".vgz") == 0) {
+        Serial.print(F(" (unsupported)"));
+      }
 #endif
 
-    Serial.println();
+      Serial.println();
+    }
   }
+
+  // Show playlists (numbered after songs)
+  if (playlistFileCount > 0) {
+    Serial.println(F(""));
+    Serial.println(F("Playlists:"));
+    Serial.println(F("----------"));
+
+    for (uint8_t i = 0; i < playlistFileCount; i++) {
+      uint8_t num = fileCount + i + 1;
+      Serial.print(F("  "));
+      if (num < 10) Serial.print(' ');  // Align single digits
+      Serial.print(num);
+      Serial.print(F(". "));
+      Serial.print(playlistFiles[i]);
+
+      // Mark if this is the auto playlist
+      if (strcasecmp(playlistFiles[i], "auto") == 0) {
+        Serial.print(F(" [auto-start]"));
+      }
+
+      Serial.println();
+    }
+  }
+
   Serial.println(F(""));
 }
 
@@ -350,6 +492,246 @@ void playFileByName(const char* name) {
 }
 
 // =============================================================================
+// Playlist Functions
+// =============================================================================
+
+int8_t findFileIndex(const char* name) {
+  for (uint8_t i = 0; i < fileCount; i++) {
+    if (strcasecmp(fileList[i], name) == 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+void shufflePlaylist() {
+  // Fisher-Yates shuffle
+  // Seed random from analog pin for entropy
+  randomSeed(analogRead(A0) ^ micros());
+
+  for (uint8_t i = playlistSize - 1; i > 0; i--) {
+    uint8_t j = random(i + 1);
+    // Swap indices
+    uint8_t tmpIdx = playlistIndices[i];
+    playlistIndices[i] = playlistIndices[j];
+    playlistIndices[j] = tmpIdx;
+    // Swap play counts
+    uint8_t tmpPlays = playlistPlays[i];
+    playlistPlays[i] = playlistPlays[j];
+    playlistPlays[j] = tmpPlays;
+  }
+}
+
+bool loadPlaylist(const char* name) {
+  // Build path: /<name>.txt
+  char path[MAX_FILENAME_LEN + 6];
+  snprintf(path, sizeof(path), "/%s.txt", name);
+
+  File file = SD.open(path);
+  if (!file) {
+    printError("Playlist not found", name);
+    return false;
+  }
+
+  // Reset playlist state
+  playlistSize = 0;
+  playlistPos = 0;
+  playlistShuffle = false;
+  playlistLoop = false;
+  playlistActive = false;
+
+  // Check for #PLAYLIST header
+  char line[MAX_FILENAME_LEN + 8];
+  if (!file.available()) {
+    file.close();
+    printError("Empty playlist file");
+    return false;
+  }
+
+  // Read first non-empty line
+  bool foundHeader = false;
+  while (file.available() && !foundHeader) {
+    size_t len = file.readBytesUntil('\n', line, sizeof(line) - 1);
+    line[len] = '\0';
+    // Trim CR if present
+    if (len > 0 && line[len - 1] == '\r') line[len - 1] = '\0';
+    // Skip empty lines
+    if (line[0] != '\0') {
+      if (strcmp(line, "#PLAYLIST") == 0) {
+        foundHeader = true;
+      } else {
+        file.close();
+        printError("Not a playlist (missing #PLAYLIST header)");
+        return false;
+      }
+    }
+  }
+
+  if (!foundHeader) {
+    file.close();
+    printError("Not a playlist (missing #PLAYLIST header)");
+    return false;
+  }
+
+  Serial.print(F("Loading playlist: "));
+  Serial.println(name);
+
+  // Parse remaining lines
+  while (file.available() && playlistSize < MAX_PLAYLIST_SIZE) {
+    size_t len = file.readBytesUntil('\n', line, sizeof(line) - 1);
+    line[len] = '\0';
+    // Trim CR if present
+    if (len > 0 && line[len - 1] == '\r') line[len - 1] = '\0';
+
+    // Skip empty lines
+    if (line[0] == '\0') continue;
+
+    // Handle comments
+    if (line[0] == '#') continue;
+
+    // Handle directives
+    if (line[0] == ':') {
+      if (strcasecmp(line, ":shuffle") == 0) {
+        playlistShuffle = true;
+        Serial.println(F("  Shuffle: ON"));
+      } else if (strcasecmp(line, ":loop") == 0) {
+        playlistLoop = true;
+        Serial.println(F("  Loop: ON"));
+      }
+      continue;
+    }
+
+    // Parse track line: filename or filename,plays
+    char* comma = strchr(line, ',');
+    uint8_t plays = 1;
+    if (comma) {
+      *comma = '\0';
+      plays = atoi(comma + 1);
+      if (plays == 0) plays = 1;
+    }
+
+    // Find file in our file list
+    int8_t idx = findFileIndex(line);
+    if (idx < 0) {
+      Serial.print(F("  Warning: file not found: "));
+      Serial.println(line);
+      continue;
+    }
+
+    playlistIndices[playlistSize] = idx;
+    playlistPlays[playlistSize] = plays;
+    playlistSize++;
+  }
+
+  file.close();
+
+  if (playlistSize == 0) {
+    printError("Playlist has no valid tracks");
+    return false;
+  }
+
+  Serial.print(F("  Loaded "));
+  Serial.print(playlistSize);
+  Serial.println(F(" tracks"));
+
+  // Shuffle if requested
+  if (playlistShuffle) {
+    shufflePlaylist();
+  }
+
+  return true;
+}
+
+void startPlaylist() {
+  if (playlistSize == 0) return;
+
+  playlistActive = true;
+  playlistPos = 0;
+  currentPlays = 0;
+  lastLoopCount = 0;
+
+  // Start first track
+  uint8_t fileIdx = playlistIndices[0];
+  uint8_t targetPlays = playlistPlays[0];
+
+  playFileByIndex(fileIdx);
+
+  // Enable looping if we need to play more than once (must be after file loads)
+  player.setLooping(targetPlays > 1 && player.hasLoop());
+
+  Serial.print(F("[Playlist: track 1/"));
+  Serial.print(playlistSize);
+  if (targetPlays > 1) {
+    Serial.print(F(", play 1/"));
+    Serial.print(targetPlays);
+  }
+  Serial.println(F("]"));
+}
+
+void playNextInPlaylist() {
+  if (!playlistActive || playlistSize == 0) return;
+
+  uint8_t targetPlays = playlistPlays[playlistPos];
+  currentPlays++;
+
+  // Check if we need to play this track again
+  if (currentPlays < targetPlays) {
+    // Track will loop automatically (looping is already enabled)
+    Serial.print(F("[Playlist: track "));
+    Serial.print(playlistPos + 1);
+    Serial.print(F("/"));
+    Serial.print(playlistSize);
+    Serial.print(F(", play "));
+    Serial.print(currentPlays + 1);
+    Serial.print(F("/"));
+    Serial.print(targetPlays);
+    Serial.println(F("]"));
+    return;
+  }
+
+  // Move to next track
+  playlistPos++;
+  currentPlays = 0;
+  lastLoopCount = 0;
+
+  // Check if playlist is complete
+  if (playlistPos >= playlistSize) {
+    if (playlistLoop) {
+      // Restart playlist
+      playlistPos = 0;
+      Serial.println(F("[Playlist: restarting]"));
+    } else {
+      // Playlist finished
+      playlistActive = false;
+      Serial.println(F("[Playlist: finished]"));
+      return;
+    }
+  }
+
+  // Brief pause between songs
+  delay(PLAYLIST_SONG_DELAY);
+
+  // Play next track
+  uint8_t fileIdx = playlistIndices[playlistPos];
+  targetPlays = playlistPlays[playlistPos];
+
+  playFileByIndex(fileIdx);
+
+  // Enable looping if we need to play more than once (must be after file loads)
+  player.setLooping(targetPlays > 1 && player.hasLoop());
+
+  Serial.print(F("[Playlist: track "));
+  Serial.print(playlistPos + 1);
+  Serial.print(F("/"));
+  Serial.print(playlistSize);
+  if (targetPlays > 1) {
+    Serial.print(F(", play 1/"));
+    Serial.print(targetPlays);
+  }
+  Serial.println(F("]"));
+}
+
+// =============================================================================
 // Command Processing
 // =============================================================================
 
@@ -369,6 +751,7 @@ void processCommand(const char* cmd) {
   }
   else if (strcasecmp(cmd, "stop") == 0) {
     player.stop();
+    playlistActive = false;  // Stop also exits playlist mode
     Serial.println(F("Stopped"));
   }
   else if (strcasecmp(cmd, "pause") == 0) {
@@ -391,14 +774,62 @@ void processCommand(const char* cmd) {
     printInfo();
   }
   else if (strcasecmp(cmd, "next") == 0) {
-    if (currentFileIndex < fileCount - 1) {
+    if (playlistActive) {
+      // In playlist mode: advance to next track
+      player.stop();
+      playlistPos++;
+      currentPlays = 0;
+      lastLoopCount = 0;
+      if (playlistPos >= playlistSize) {
+        if (playlistLoop) {
+          playlistPos = 0;
+        } else {
+          playlistActive = false;
+          Serial.println(F("[Playlist: finished]"));
+          return;
+        }
+      }
+      delay(PLAYLIST_SONG_DELAY);
+      uint8_t fileIdx = playlistIndices[playlistPos];
+      uint8_t targetPlays = playlistPlays[playlistPos];
+      playFileByIndex(fileIdx);
+      player.setLooping(targetPlays > 1 && player.hasLoop());
+      Serial.print(F("[Playlist: track "));
+      Serial.print(playlistPos + 1);
+      Serial.print(F("/"));
+      Serial.print(playlistSize);
+      Serial.println(F("]"));
+    } else if (currentFileIndex < fileCount - 1) {
       playFileByIndex(currentFileIndex + 1);
     } else {
       Serial.println(F("Already at last file"));
     }
   }
   else if (strcasecmp(cmd, "prev") == 0) {
-    if (currentFileIndex > 0) {
+    if (playlistActive) {
+      // In playlist mode: go to previous track
+      player.stop();
+      if (playlistPos > 0) {
+        playlistPos--;
+      } else if (playlistLoop) {
+        playlistPos = playlistSize - 1;
+      } else {
+        Serial.println(F("Already at first track"));
+        return;
+      }
+      currentPlays = 0;
+      lastLoopCount = 0;
+      delay(PLAYLIST_SONG_DELAY);
+      uint8_t fileIdx = playlistIndices[playlistPos];
+      uint8_t targetPlays = playlistPlays[playlistPos];
+      playFileByIndex(fileIdx);
+      player.setLooping(targetPlays > 1 && player.hasLoop());
+      Serial.print(F("[Playlist: track "));
+      Serial.print(playlistPos + 1);
+      Serial.print(F("/"));
+      Serial.print(playlistSize);
+      Serial.println(F("]"));
+    } else if (currentFileIndex > 0) {
       playFileByIndex(currentFileIndex - 1);
     } else {
       Serial.println(F("Already at first file"));
@@ -406,6 +837,7 @@ void processCommand(const char* cmd) {
   }
   else if (strcasecmp(cmd, "rescan") == 0) {
     scanFiles();
+    scanPlaylists();
     printFileList();
   }
   else if (strncasecmp(cmd, "play ", 5) == 0) {
@@ -422,10 +854,16 @@ void processCommand(const char* cmd) {
       int num = atoi(arg);
       if (num >= 1 && num <= fileCount) {
         playFileByIndex(num - 1);
+      } else if (num > fileCount && num <= fileCount + playlistFileCount) {
+        // It's a playlist number
+        int pIdx = num - fileCount - 1;
+        if (loadPlaylist(playlistFiles[pIdx])) {
+          startPlaylist();
+        }
       } else {
-        printError("Invalid file number");
+        printError("Invalid number");
         Serial.print(F("Valid range: 1-"));
-        Serial.println(fileCount);
+        Serial.println(fileCount + playlistFileCount);
       }
     } else if (*arg) {
       // Try to play by filename
@@ -434,9 +872,19 @@ void processCommand(const char* cmd) {
       printError("Usage: play <number> or play <filename>");
     }
   }
-  else if (strncasecmp(cmd, "playlist", 8) == 0) {
-    // TODO: Implement playlist support
-    Serial.println(F("Playlist support coming soon!"));
+  else if (strncasecmp(cmd, "playlist ", 9) == 0) {
+    const char* arg = cmd + 9;
+    while (*arg == ' ') arg++;  // Skip spaces
+    if (*arg) {
+      if (loadPlaylist(arg)) {
+        startPlaylist();
+      }
+    } else {
+      printError("Usage: playlist <name> (loads <name>.txt)");
+    }
+  }
+  else if (strcasecmp(cmd, "playlist") == 0) {
+    printError("Usage: playlist <name> (loads <name>.txt)");
   }
   else {
     // Try to interpret as a number for quick play
@@ -449,6 +897,12 @@ void processCommand(const char* cmd) {
       int num = atoi(cmd);
       if (num >= 1 && num <= fileCount) {
         playFileByIndex(num - 1);
+      } else if (num > fileCount && num <= fileCount + playlistFileCount) {
+        // It's a playlist number
+        int pIdx = num - fileCount - 1;
+        if (loadPlaylist(playlistFiles[pIdx])) {
+          startPlaylist();
+        }
       } else {
         printError("Unknown command", cmd);
         Serial.println(F("Type 'help' for available commands"));
@@ -468,17 +922,18 @@ void printHelp() {
   Serial.println(F(""));
   Serial.println(F("Commands:"));
   Serial.println(F("---------"));
-  Serial.println(F("  list          List VGM files on SD card"));
-  Serial.println(F("  play <n>      Play file by number"));
-  Serial.println(F("  play <name>   Play file by name"));
-  Serial.println(F("  stop          Stop playback"));
-  Serial.println(F("  pause         Pause/resume playback"));
-  Serial.println(F("  next          Next file"));
-  Serial.println(F("  prev          Previous file"));
-  Serial.println(F("  loop          Toggle loop mode"));
-  Serial.println(F("  info          Show current track info"));
-  Serial.println(F("  rescan        Rescan SD card for files"));
-  Serial.println(F("  help          Show this help"));
+  Serial.println(F("  list            List VGM files on SD card"));
+  Serial.println(F("  play <n>        Play file by number"));
+  Serial.println(F("  play <name>     Play file by name"));
+  Serial.println(F("  playlist <name> Play playlist (<name>.txt)"));
+  Serial.println(F("  stop            Stop playback"));
+  Serial.println(F("  pause           Pause/resume playback"));
+  Serial.println(F("  next            Next file"));
+  Serial.println(F("  prev            Previous file"));
+  Serial.println(F("  loop            Toggle loop mode"));
+  Serial.println(F("  info            Show current track info"));
+  Serial.println(F("  rescan          Rescan SD card for files"));
+  Serial.println(F("  help            Show this help"));
   Serial.println(F(""));
   Serial.println(F("Tip: Just type a number to play that file"));
   Serial.println(F(""));
@@ -514,8 +969,25 @@ void printInfo() {
     Serial.println(dur % 60);
   }
 
-  Serial.print(F("Loop: "));
-  Serial.println(player.isLooping() ? F("ON") : F("OFF"));
+  if (playlistActive) {
+    Serial.print(F("Playlist: track "));
+    Serial.print(playlistPos + 1);
+    Serial.print(F("/"));
+    Serial.print(playlistSize);
+    uint8_t targetPlays = playlistPlays[playlistPos];
+    if (targetPlays > 1) {
+      Serial.print(F(", play "));
+      Serial.print(currentPlays + 1);
+      Serial.print(F("/"));
+      Serial.print(targetPlays);
+    }
+    if (playlistShuffle) Serial.print(F(" [shuffle]"));
+    if (playlistLoop) Serial.print(F(" [loop]"));
+    Serial.println();
+  } else {
+    Serial.print(F("Loop: "));
+    Serial.println(player.isLooping() ? F("ON") : F("OFF"));
+  }
   Serial.println(F(""));
 }
 
