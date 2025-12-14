@@ -20,9 +20,9 @@
  * Usage:
  *   1. Upload this sketch to your board
  *   2. Run the Python streaming script:
- *        python tools/stream_vgm.py song.vgm
- *        python tools/stream_vgm.py song.vgm --loop
- *        python tools/stream_vgm.py --help
+ *        python stream_vgm.py song.vgm
+ *        python stream_vgm.py song.vgm --loop
+ *        python stream_vgm.py --help
  *
  * Supported boards: Arduino Uno, Arduino Mega, Teensy 4.0/4.1, ESP32
  */
@@ -138,9 +138,6 @@ uint32_t nextCommandTime = 0;
 // Flow control
 bool streamEnded = false;
 
-// Stats
-uint32_t commandsProcessed = 0;
-
 // Timeout detection
 uint32_t lastDataTime = 0;
 #define DISCONNECT_TIMEOUT_MS 500
@@ -181,7 +178,7 @@ void setup() {
 // =============================================================================
 
 // Receive state machine
-enum RxState { RX_IDLE, RX_HAVE_HEADER, RX_HAVE_LENGTH, RX_READING_DATA };
+enum RxState { RX_IDLE, RX_HAVE_HEADER, RX_HAVE_LENGTH, RX_AWAITING_CHECKSUM };
 RxState rxState = RX_IDLE;
 uint8_t rxLength = 0;
 uint8_t rxCount = 0;
@@ -206,7 +203,6 @@ void receiveData() {
           streamEnded = false;
           chunksReceived = 0;
           nextCommandTime = 0;
-          commandsProcessed = 0;
           state = WAITING;
           Serial.write(CMD_ACK);
           Serial.write(BOARD_TYPE);
@@ -234,6 +230,7 @@ void receiveData() {
       case RX_HAVE_HEADER:
         // This byte is the length
         if (b == 0 || b > CHUNK_SIZE) {
+          Serial.write(FLOW_NAK);  // Invalid length - tell Python to retry
           rxState = RX_IDLE;
           break;
         }
@@ -256,12 +253,12 @@ void receiveData() {
         }
 
         if (rxCount >= rxLength) {
-          rxState = RX_READING_DATA;  // Next byte is checksum
+          rxState = RX_AWAITING_CHECKSUM;
         }
         break;
       }
 
-      case RX_READING_DATA:
+      case RX_AWAITING_CHECKSUM:
         // This byte is the checksum
         if (b == rxChecksum && bufferFree() >= rxLength) {
           // Valid chunk - copy to ring buffer
@@ -349,7 +346,6 @@ int32_t processCommand() {
 
   // Consume command byte
   bufferRead();
-  commandsProcessed++;
 
   switch (cmd) {
     // === Chip Writes ===
@@ -460,9 +456,14 @@ void updatePlayback() {
 
     if (result > 0) {
       // Wait command: schedule next command
-      // Convert samples to microseconds: samples * 1000000 / 44100
-      // Approximation: samples * 23 ≈ samples * 22.676 (error < 1.5%)
+      // Convert samples to microseconds: samples * 1000000 / 44100 = samples * 22.676us
+#if defined(__IMXRT1062__)
+      // Teensy 4.x: Use accurate division (fast 32-bit math)
+      uint32_t waitUs = (uint32_t)result * 1000000UL / 44100UL;
+#else
+      // AVR: Use fast approximation, samples * 23 ≈ samples * 22.676 (error < 1.5%)
       uint32_t waitUs = (uint32_t)result * 23UL;
+#endif
 
       // Smart catch-up: add wait to scheduled time, not current time
       // This prevents accumulating drift. If we're behind, we stay behind
@@ -529,7 +530,6 @@ void loop() {
       rxState = RX_IDLE;
       chunksReceived = 0;
       nextCommandTime = 0;
-      commandsProcessed = 0;
       state = WAITING;
 
       // Signal ready for new stream
