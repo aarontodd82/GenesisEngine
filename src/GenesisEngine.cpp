@@ -267,7 +267,7 @@ bool GenesisEngine::playFile(const char* path) {
   // VGZ not supported on this platform
   if (isVGZ) {
     Serial.println("VGZ files not supported on this platform");
-    Serial.println("Use tools/vgm_prep.py to convert:");
+    Serial.println("Use vgm_prep.py to convert:");
     Serial.println("  python vgm_prep.py song.vgz -o song.vgm");
     return false;
   }

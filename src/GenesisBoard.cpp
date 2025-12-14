@@ -1,4 +1,5 @@
 #include "GenesisBoard.h"
+#include "config/feature_config.h"
 #include <SPI.h>
 
 #if defined(PLATFORM_ESP32)
@@ -7,7 +8,14 @@
 
 // Use hardware SPI for shift register (much faster than bit-banging)
 // Set to 0 to use software bit-banging on custom pins
-#define USE_HARDWARE_SPI 1
+// Automatically disabled on AVR when SD card support is enabled to avoid
+// SPI bus conflict (shift register has no CS pin, would receive garbage
+// during SD communication)
+#if defined(PLATFORM_AVR) && GENESIS_ENGINE_USE_SD
+  #define USE_HARDWARE_SPI 0
+#else
+  #define USE_HARDWARE_SPI 1
+#endif
 
 // =============================================================================
 // YM2612 Register Definitions

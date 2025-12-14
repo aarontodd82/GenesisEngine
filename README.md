@@ -147,16 +147,17 @@ Stream audio directly from BlastEm or other Genesis emulators to hear games on r
 
 ## Platform Notes
 
-| Feature | Teensy 4.x | ESP32 | AVR |
-|---------|------------|-------|-----|
-| PROGMEM playback | Yes | Yes | Yes |
-| GEP format | Yes | Yes | Yes |
-| Serial streaming | Yes | Yes | Yes |
-| SD card | Built-in | Yes | External |
-| VGZ decompression | Native | Native | Via tools |
-| PCM buffer size | 8KB+ | 4KB | 256 bytes |
+| Feature | Teensy 4.x | ESP32 | Mega | Uno |
+|---------|------------|-------|------|-----|
+| PROGMEM playback | Yes | Yes | Yes | Yes |
+| Serial streaming | Yes | Yes | Yes | Yes |
+| SD card | Built-in | Yes | Limited* | No |
+| VGZ decompression | Native | Native | Via tools | Via tools |
+| PCM buffer size | 8KB+ | 4KB | 512 bytes | 256 bytes |
 
-Teensy 4.x offers the best experience with fast GPIO, large memory, and built-in SD card support on the 4.1.
+**Teensy 4.x is recommended**, especially for SD card playback. It offers fast GPIO, large memory, and built-in SD on the 4.1.
+
+*Mega SD support requires software SPI for the shift register due to pin conflicts. Results may vary—some VGM files with heavy DAC usage may have timing issues.
 
 ## Examples
 

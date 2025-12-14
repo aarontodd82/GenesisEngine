@@ -2,9 +2,54 @@
 
 Play VGM files from an SD card with an interactive serial menu. This example turns the Genesis Engine into a standalone music player for Sega Genesis/Mega Drive soundtracks.
 
+## Wiring
+
+### Recommended: Teensy 4.1
+
+Teensy 4.1 provides the best experience with built-in SD card slot, plenty of RAM, and full VGZ support.
+
+### Arduino Uno - NOT SUPPORTED
+
+Only 2KB RAM - not enough for SD library.
+
+### Arduino Mega - Limited Support
+
+Works but results may vary. Software SPI for the shift register is slower than Teensy's hardware SPI, which may affect timing on some VGM files. Use `vgm_prep.py` to prepare files.
+
+The SD card and shift register both use SPI, but the CD74HCT164E shift register has no chip select pin. To avoid conflicts, **the shift register MUST use different pins** than the SD card.
+
+| Genesis Engine Board | Arduino Pin |
+|---------------------|-------------|
+| WR_P (PSG write)    | 2           |
+| WR_Y (YM2612 write) | 3           |
+| IC_Y (YM2612 reset) | 4           |
+| A0_Y (YM2612 addr)  | 5           |
+| A1_Y (YM2612 port)  | 6           |
+| **Shift CLK**       | **7** ⚠️    |
+| **Shift DATA**      | **8** ⚠️    |
+
+⚠️ **Do NOT connect shift register to pins 51/52!** Those are used by the SD card.
+
+SD card uses Mega's hardware SPI:
+
+| SD Card Module | Arduino Pin |
+|----------------|-------------|
+| CS             | 53          |
+| MOSI           | 51          |
+| MISO           | 50          |
+| SCK            | 52          |
+| VCC            | 5V          |
+| GND            | GND         |
+
+**Teensy 4.1:**
+
+Uses the built-in SD card slot - no SD wiring needed. Genesis board can use the default hardware SPI pins since there's no conflict.
+
+---
+
 ## How to Use
 
-1. **Prepare your files**: Place `.vgm` files in the root of a FAT32-formatted SD card. On Arduino Uno/Mega, use `vgm_prep.py` to convert `.vgz` files first:
+1. **Prepare your files**: Place `.vgm` files in the root of a FAT32-formatted SD card. On Arduino Mega, use `vgm_prep.py` to convert `.vgz` files first:
    ```
    python vgm_prep.py song.vgz -o song.vgm
    ```
