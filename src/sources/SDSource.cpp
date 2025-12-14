@@ -148,7 +148,12 @@ uint32_t SDSource::position() const {
   if (!isOpen_) {
     return 0;
   }
-  return file_.position();
+  // Return position relative to data start (consistent with seek())
+  uint32_t absPos = file_.position();
+  if (absPos >= dataStartOffset_) {
+    return absPos - dataStartOffset_;
+  }
+  return 0;
 }
 
 uint32_t SDSource::size() const {

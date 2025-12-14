@@ -101,7 +101,12 @@ uint8_t* PCMDataBank::tryAllocate(uint32_t size, bool& isPSRAM) {
     return nullptr;
   }
 
+#if defined(ARDUINO_ARCH_AVR)
+  // AVR doesn't have std::nothrow, use malloc instead
+  return (uint8_t*)malloc(size);
+#else
   return new (std::nothrow) uint8_t[size];
+#endif
 }
 
 // =============================================================================
@@ -111,6 +116,11 @@ uint8_t* PCMDataBank::tryAllocate(uint32_t size, bool& isPSRAM) {
 bool PCMDataBank::loadDataBlock(uint32_t originalSize,
                                  int (*readFunc)(void* context),
                                  void* context) {
+  // Skip empty data blocks (some VGM files have these)
+  if (originalSize == 0) {
+    return true;
+  }
+
   // Store original size
   originalSize_ = originalSize;
 
@@ -140,6 +150,7 @@ bool PCMDataBank::loadDataBlock(uint32_t originalSize,
       allocatedSize_ = trySize;
       usingPSRAM_ = isPSRAM;
       downsampleRatio_ = ratios[attempt];
+      dacDisabled_ = false;  // Clear in case a previous empty block set it
 
       // Read and possibly downsample the data
       uint32_t stored = 0;

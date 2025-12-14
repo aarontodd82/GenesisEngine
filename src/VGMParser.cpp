@@ -360,11 +360,6 @@ void VGMParser::handleDataBlock() {
   uint8_t dataType = source_->read();
   uint32_t dataSize = source_->readUInt32();
 
-  Serial.print("Data block: type=0x");
-  Serial.print(dataType, HEX);
-  Serial.print(" size=");
-  Serial.println(dataSize);
-
   // Handle YM2612 PCM data (type 0x00)
   if (dataType == VGM_DATA_YM2612_PCM) {
     // Use PCMDataBank to load the data
