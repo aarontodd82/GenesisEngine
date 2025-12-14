@@ -1,224 +1,75 @@
 # MIDISynth
 
-Turn your GenesisEngine into a USB MIDI synthesizer. Play the YM2612 FM chip and SN76489 PSG from any DAW, MIDI keyboard, or sequencer.
+A MIDI synthesizer for the GenesisEngine board. Play the YM2612 FM chip and SN76489 PSG from any DAW, keyboard, or sequencer using real Sega Genesis hardware.
 
-## Requirements
+## Platform Requirements
 
-- Teensy 4.0 or 4.1
-- GenesisEngine board with YM2612 and SN76489
-- USB cable to computer
+**Teensy 4.x** works as a standalone USB MIDI instrument. Connect it to your computer and it appears as "Genesis Engine" in your MIDI device list. You can load custom patches using the included `genesis_patch.py` script, though the companion app below offers more features.
+
+**Arduino Uno/Mega** requires the [GenesisEngineSynthApp](https://github.com/aarontodd82/GenesisEngineSynthApp) companion application. The app bridges your computer's MIDI to the Arduino over serial. Download releases for Windows, Mac, and Linux from the GitHub page. On Windows, you'll also need [LoopMIDI](https://www.tobias-erichsen.de/software/loopmidi.html) to create a virtual MIDI port for your DAW.
 
 ## Setup
 
-### 1. Configure Arduino IDE
+### Teensy
 
-In the Arduino IDE, set the USB type to include MIDI:
+1. In Arduino IDE: **Tools → USB Type → Serial + MIDI**
+2. Upload the sketch
+3. Connect via USB - your computer sees "Genesis Engine"
 
-**Tools → USB Type → Serial + MIDI**
+### Arduino
 
-### 2. Adjust Pin Configuration (if needed)
+1. Upload the sketch
+2. Run GenesisEngineSynthApp
+3. Select your Arduino's COM port and connect
+4. On Windows: Create a LoopMIDI port, select it in the app, then route your DAW to that port
 
-Open `MIDISynth.ino` and verify the pin definitions match your wiring:
+## Loading Patches
 
-```cpp
-#define PIN_WR_P  2   // PSG write strobe
-#define PIN_WR_Y  3   // YM2612 write strobe
-#define PIN_IC_Y  4   // YM2612 reset
-#define PIN_A0_Y  5   // YM2612 A0
-#define PIN_A1_Y  6   // YM2612 A1
-#define PIN_SCK   13  // Shift register clock
-#define PIN_SDI   11  // Shift register data
+The synth starts with 8 built-in FM patches. To load custom patches:
+
+**Using GenesisEngineSynthApp** (recommended): The app provides a patch browser, bank management, and real-time parameter editing.
+
+**Using genesis_patch.py** (Teensy only):
+```bash
+pip install python-rtmidi
+python genesis_patch.py load piano.tfi 1      # Load to channel 1
+python genesis_patch.py bank sonic2.gyb       # Load a GYB bank
 ```
 
-### 3. Upload
+Supported formats: TFI, DMP, GYB. Find patches at [VGMRips](https://vgmrips.net) or create your own with [Furnace Tracker](https://github.com/tildearrow/furnace).
 
-Upload the sketch to your Teensy. After upload, your computer should see a new MIDI device called "Teensy MIDI" or similar.
+## Quick Reference
 
-## How It Works
+### MIDI Channels
 
-### MIDI Channel Mapping
-
-The MIDI channel mapping is fixed:
-
-| MIDI Channel | Hardware | Description |
-|--------------|----------|-------------|
-| 1-6 | YM2612 FM | 6 FM synthesis channels |
-| 7-9 | SN76489 Tone | 3 PSG square wave channels |
-| 10 | SN76489 Noise | 1 PSG noise channel |
-
-FM is always channels 1-6. PSG is always channels 7-10. This mapping does not change between modes.
-
-### Patch Slots
-
-The synth has two separate banks of patch storage in RAM:
-
-- **16 FM patch slots** (0-15) for YM2612
-- **8 PSG envelope slots** (0-7) for SN76489
-
-Each MIDI channel is assigned to a slot. Use **Program Change** to switch which slot a channel uses. Multiple channels can use the same slot.
-
-**Note:** Patches are stored in RAM only. All patches reset to defaults when powered off.
+| Channel | Hardware |
+|---------|----------|
+| 1-6 | YM2612 FM |
+| 7-9 | SN76489 Tone |
+| 10 | SN76489 Noise |
 
 ### Synth Modes
 
-**Multi-timbral Mode** (default)
-- Each FM channel (1-6) plays independently with its own patch
-- Good for: layered arrangements, different instruments per channel
+- **Multi-timbral** (default): Each FM channel plays independently
+- **Poly**: Channel 1 controls all 6 FM voices polyphonically
 
-**Poly Mode**
-- MIDI Channel 1 controls all 6 FM voices with the same patch
-- Automatic voice allocation - play chords and voices are assigned automatically
-- When all 6 voices are in use, the oldest note is stolen
-- Good for: playing the synth like a keyboard instrument
+Switch with CC 126 (multi) or CC 127 (poly).
 
-Switch modes:
-- **CC 126**: Multi-timbral mode
-- **CC 127**: Poly mode
-
-PSG channels (7-10) work the same in both modes.
-
-## Default Patches
-
-On startup, the synth loads 8 built-in FM patches and 4 PSG envelopes.
-
-### FM Patches (slots 0-7)
-
-| Slot | Sound | Default Channel |
-|------|-------|-----------------|
-| 0 | Electric Piano | Ch 1 |
-| 1 | Synth Bass | Ch 2 |
-| 2 | Brass | Ch 3 |
-| 3 | Lead Synth | Ch 4 |
-| 4 | Organ | Ch 5 |
-| 5 | Strings | Ch 6 |
-| 6 | Pluck/Guitar | — |
-| 7 | Bell/Chime | — |
-| 8-15 | (empty) | — |
-
-### PSG Envelopes (slots 0-7)
-
-| Slot | Sound | Default Channel |
-|------|-------|-----------------|
-| 0 | Short Pluck | Ch 7 |
-| 1 | Sustain (organ-like) | Ch 8 |
-| 2 | Slow Attack Pad | Ch 9 |
-| 3 | Tremolo | — |
-| 4-7 | (empty) | — |
-
-Channel 10 (noise) has no envelope - it plays different noise types based on note:
-- Low notes (0-63): Periodic noise (buzzy)
-- High notes (64-127): White noise (hi-hats, snares)
-
-## MIDI Messages
+### Key MIDI Controls
 
 | Message | Effect |
 |---------|--------|
-| Note On/Off | Play notes |
-| Program Change | Select patch slot (0-15 for FM, 0-7 for PSG) |
-| Pitch Bend | Bend pitch ±2 semitones (FM only) |
-| CC 1 (Mod Wheel) | Vibrato depth (FM only) |
-| CC 7 (Volume) | Channel volume |
-| CC 10 (Pan) | Stereo panning (FM only) |
-| CC 126 | Switch to Multi-timbral mode |
-| CC 127 | Switch to Poly mode |
+| Program Change | Select patch slot |
+| Pitch Bend | ±2 semitones (FM) |
+| CC 1 | Vibrato depth (FM) |
+| CC 7 | Volume |
+| CC 10 | Pan (FM) |
+| CC 64 | Sustain pedal (FM) |
 
-### Poly Mode Behavior
+### Real-Time Parameter CCs
 
-In poly mode, MIDI Channel 1 messages affect all 6 FM voices:
-- **Notes** are allocated across voices automatically
-- **Program Change** sets the patch for all 6 voices
-- **Pitch Bend** bends all active voices together
-- **Volume/Mod Wheel** affects all voices
-
-## Loading Custom Patches
-
-### Install Python Tool
-
-```bash
-pip install python-rtmidi
-```
-
-### Find Your MIDI Port
-
-```bash
-python genesis_patch.py list-ports
-```
-
-Look for "Teensy MIDI" in the list.
-
-### Load a Patch to a Channel
-
-Send a patch file directly to an FM channel (0-5):
-
-```bash
-python genesis_patch.py load piano.tfi 0
-```
-
-This loads the patch and immediately applies it to the channel.
-
-### Store a Patch to a Slot
-
-Store a patch in a slot (0-15) without applying it:
-
-```bash
-python genesis_patch.py store bass.dmp 5
-```
-
-Then use Program Change to select slot 5 on any channel.
-
-### Load a Patch Bank
-
-GYB banks contain multiple patches ripped from games:
-
-```bash
-python genesis_patch.py bank sonic2.gyb
-```
-
-This loads up to 16 patches into slots 0-15. Use Program Change to select them.
-
-### Supported Formats
-
-| Format | Description |
-|--------|-------------|
-| TFI | 42-byte FM patch (Furnace, TFM Music Maker) |
-| DMP | DefleMask preset |
-| GYB | Patch bank ripped from games |
-
-### Where to Get Patches
-
-- **[VGMRips](https://vgmrips.net)** - GYB banks from classic Genesis games
-- **[Furnace Tracker](https://github.com/tildearrow/furnace)** - Create your own, export as TFI
-- **[DefleMask](https://www.deflemask.com)** - Export as DMP or TFI
-- **[OPN2BankEditor](https://github.com/Wohlstand/OPN2BankEditor)** - Convert between formats
-
-## Advanced: Real-Time Parameter Control
-
-Tweak FM parameters in real-time via CC (affects the current patch on that channel):
-
-| CC | Parameter | Range |
-|----|-----------|-------|
-| 14 | Algorithm | 0-7 |
-| 15 | Feedback | 0-7 |
-| 16-19 | Operator 1-4 Total Level | 0-127 |
-
-## Troubleshooting
-
-**No sound:**
-- Check that your DAW is sending to the Teensy MIDI port
-- Verify MIDI channel (1-6 for FM, 7-10 for PSG)
-- Make sure volume (CC 7) isn't at zero
-
-**MIDI device not showing up:**
-- Confirm USB Type is set to "Serial + MIDI" before uploading
-- Try a different USB cable
-- Restart your DAW after connecting
-
-**Python tool can't find Teensy:**
-- Run `list-ports` to see available MIDI devices
-- On Windows, the port may be named differently
-- Make sure no other application has the MIDI port open
-
-**Patches reset on power cycle:**
-- This is expected - patches are stored in RAM only
-- Use the Python tool to reload patches after power-on
-- Or load a GYB bank at startup from your DAW
+| CC | Parameter |
+|----|-----------|
+| 14 | Algorithm (0-7) |
+| 15 | Feedback (0-7) |
+| 16-19 | Operator 1-4 Total Level |
