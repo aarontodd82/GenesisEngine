@@ -23,7 +23,7 @@ Options:
 Note: For uno/mega without --strip-dac or --keep-dac, DAC is auto-downsampled to 1/4.
 
 Platforms and their flash limits:
-    uno      - 24KB   (32KB total, leave 8KB for code)
+    uno      - 16KB   (32KB total, ~14KB for GenesisEngine library)
     mega     - 28KB   (32KB per-array AVR limit)
     teensy40 - 1.5MB  (2MB total)
     teensy41 - 7MB    (8MB total)
@@ -47,7 +47,7 @@ from pathlib import Path
 # AVR has a 32KB limit per PROGMEM array due to 16-bit pointers
 # Limits are conservative to leave room for code and libraries
 PLATFORM_LIMITS = {
-    'uno': 24 * 1024,         # 32KB flash total, leave 8KB for code
+    'uno': 16 * 1024,         # 32KB flash total, ~14KB for GenesisEngine library
     'mega': 28 * 1024,        # 32KB per-array limit, leave margin for code
     'teensy40': 1536 * 1024,  # 2MB total, leave 512KB for code
     'teensy41': 7 * 1024 * 1024,  # 8MB total, leave 1MB for code

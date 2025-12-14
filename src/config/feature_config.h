@@ -10,13 +10,10 @@
 
 // -----------------------------------------------------------------------------
 // SD Card Support
-// Enabled on all platforms (AVR reads byte-by-byte, no large buffers needed)
-// Note: AVR platforms (Uno/Mega) require external SD module
+// Auto-enabled when SD.h library is available (detected via __has_include)
 // -----------------------------------------------------------------------------
 #ifndef GENESIS_ENGINE_DISABLE_SD
-  #if defined(PLATFORM_TEENSY4) || defined(PLATFORM_TEENSY3) || \
-      defined(PLATFORM_ESP32) || defined(PLATFORM_RP2040) || \
-      defined(PLATFORM_SAM) || defined(PLATFORM_AVR)
+  #if __has_include(<SD.h>)
     #define GENESIS_ENGINE_USE_SD 1
   #endif
 #endif
