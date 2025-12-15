@@ -31,10 +31,11 @@
 #define FIRMWARE_VERSION 1
 
 #include <GenesisBoard.h>
-#include "FMPatch.h"
-#include "PSGEnvelope.h"
-#include "FrequencyTables.h"
-#include "DefaultPatches.h"
+#include <synth/FMPatch.h>
+#include <synth/FMFrequency.h>
+#include <synth/PSGFrequency.h>
+#include <synth/PSGEnvelope.h>
+#include <synth/DefaultPatches.h>
 
 // =============================================================================
 // Pin Configuration (match your hardware)
@@ -465,32 +466,15 @@ void fmNoteOff(uint8_t ch, uint8_t note) {
 }
 
 void fmKeyOn(uint8_t ch) {
-    // Key on register is always on port 0
-    // Bits 4-7: operator enable (all 4 = 0xF0)
-    // Bits 0-2: channel (0-2 for port 0, 4-6 for port 1)
-    uint8_t chBits = (ch >= 3) ? (ch - 3 + 4) : ch;
-    board.writeYM2612(0, 0x28, 0xF0 | chBits);
+    FMFrequency::keyOn(board, ch);
 }
 
 void fmKeyOff(uint8_t ch) {
-    uint8_t chBits = (ch >= 3) ? (ch - 3 + 4) : ch;
-    board.writeYM2612(0, 0x28, 0x00 | chBits);
+    FMFrequency::keyOff(board, ch);
 }
 
 void setFMFrequency(uint8_t ch, uint8_t note) {
-    uint8_t port = (ch >= 3) ? 1 : 0;
-    uint8_t chReg = ch % 3;
-
-    // Clamp note to valid range
-    if (note > 127) note = 127;
-
-    // Look up F-number and block from table
-    uint16_t fnum = pgm_read_word(&fmFreqTable[note].fnum);
-    uint8_t block = pgm_read_byte(&fmFreqTable[note].block);
-
-    // Write frequency (high byte first for latching)
-    board.writeYM2612(port, 0xA4 + chReg, (block << 3) | (fnum >> 8));
-    board.writeYM2612(port, 0xA0 + chReg, fnum & 0xFF);
+    FMFrequency::writeToChannel(board, ch, note);
 }
 
 void setFMPanning(uint8_t ch, uint8_t pan) {
@@ -502,37 +486,9 @@ void setFMPanning(uint8_t ch, uint8_t pan) {
     board.writeYM2612(port, 0xB4 + chReg, pan);
 }
 
-// Helper: get carrier mask for algorithm
-// IMPORTANT: Our FMPatch stores operators in TFI order: S1, S3, S2, S4 (indices 0, 1, 2, 3)
-// Carriers by algorithm (in slot terms):
-//   ALG 0-3: S4 only           → index 3
-//   ALG 4:   S2, S4            → indices 2, 3
-//   ALG 5-6: S2, S3, S4        → indices 2, 1, 3
-//   ALG 7:   S1, S2, S3, S4    → all
+// Helper: get carrier mask for algorithm - delegates to library
 void getCarrierMask(uint8_t algorithm, bool* isCarrier) {
-    isCarrier[0] = isCarrier[1] = isCarrier[2] = isCarrier[3] = false;
-
-    switch (algorithm) {
-        case 0: case 1: case 2: case 3:
-            // S4 only
-            isCarrier[3] = true;
-            break;
-        case 4:
-            // S2 and S4
-            isCarrier[2] = true;  // S2 is at index 2 in TFI order
-            isCarrier[3] = true;  // S4 is at index 3
-            break;
-        case 5: case 6:
-            // S2, S3, S4
-            isCarrier[1] = true;  // S3 is at index 1 in TFI order
-            isCarrier[2] = true;  // S2 is at index 2
-            isCarrier[3] = true;  // S4 is at index 3
-            break;
-        case 7:
-            // All operators are carriers
-            isCarrier[0] = isCarrier[1] = isCarrier[2] = isCarrier[3] = true;
-            break;
-    }
+    FMPatchUtils::getCarrierMask(algorithm, isCarrier);
 }
 
 void applyVelocity(uint8_t ch, uint8_t velocity) {
@@ -979,27 +935,7 @@ void handlePitchBend(uint8_t ch, uint16_t bend) {
 }
 
 void setFMFrequencyWithBend(uint8_t ch, uint8_t note, int16_t bend) {
-    uint8_t port = (ch >= 3) ? 1 : 0;
-    uint8_t chReg = ch % 3;
-
-    if (note > 127) note = 127;
-
-    // Get base frequency
-    uint16_t fnum = pgm_read_word(&fmFreqTable[note].fnum);
-    uint8_t block = pgm_read_byte(&fmFreqTable[note].block);
-
-    // Apply pitch bend (±2 semitones = ±8192)
-    // Each semitone is approximately fnum * 0.059 (2^(1/12) - 1)
-    // For ±2 semitones: bend range maps to ±12% of fnum
-    if (bend != 0) {
-        // Scale: full bend = ±2 semitones ≈ ±12% frequency change
-        int32_t bendAmount = ((int32_t)fnum * bend) / 68000;  // ~12% at full bend
-        fnum = constrain(fnum + bendAmount, 0, 2047);
-    }
-
-    // Write frequency
-    board.writeYM2612(port, 0xA4 + chReg, (block << 3) | (fnum >> 8));
-    board.writeYM2612(port, 0xA0 + chReg, fnum & 0xFF);
+    FMFrequency::writeToChannelWithBend(board, ch, note, bend);
 }
 
 // =============================================================================
@@ -1167,37 +1103,9 @@ void handleSysEx(const uint8_t* data, uint16_t len) {
 // Patch Loading
 // =============================================================================
 
-// Parse patch from SysEx data
-// Supports both legacy 42-byte (TFI) and extended 45-byte formats
-void parsePatchData(const uint8_t* data, FMPatch& patch, bool extended) {
-    patch.algorithm = data[0];
-    patch.feedback = data[1];
-
-    for (int op = 0; op < 4; op++) {
-        const uint8_t* opData = &data[2 + op * 10];
-        patch.op[op].mul = opData[0];
-        patch.op[op].dt = opData[1];
-        patch.op[op].tl = opData[2];
-        patch.op[op].rs = opData[3];
-        patch.op[op].ar = opData[4];
-        patch.op[op].dr = opData[5];
-        patch.op[op].sr = opData[6];
-        patch.op[op].rr = opData[7];
-        patch.op[op].sl = opData[8];
-        patch.op[op].ssg = opData[9];
-    }
-
-    // Extended format includes pan/ams/pms
-    if (extended) {
-        patch.pan = data[42];
-        patch.ams = data[43];
-        patch.pms = data[44];
-    } else {
-        // Default to center, no LFO
-        patch.pan = PAN_CENTER;
-        patch.ams = 0;
-        patch.pms = 0;
-    }
+// Parse patch from SysEx data - delegates to library
+void parsePatchData(const uint8_t* data, struct FMPatch& patch, bool extended) {
+    FMPatchUtils::parseFromData(data, patch, extended);
 }
 
 // Legacy wrapper for backward compatibility
@@ -1205,35 +1113,8 @@ void parseTFIPatch(const uint8_t* data, FMPatch& patch) {
     parsePatchData(data, patch, false);
 }
 
-void writeFMPatch(uint8_t ch, const FMPatch& patch) {
-    uint8_t port = (ch >= 3) ? 1 : 0;
-    uint8_t chReg = ch % 3;
-
-    // Write algorithm and feedback
-    board.writeYM2612(port, 0xB0 + chReg, (patch.feedback << 3) | patch.algorithm);
-
-    // Write L/R/AMS/PMS (pan and LFO sensitivity) - part of the complete voice
-    board.writeYM2612(port, 0xB4 + chReg, patch.getLRAMSPMS());
-
-    // Operator register offsets: S1=0, S3=8, S2=4, S4=12
-    // TFI stores in order: S1, S3, S2, S4 (indices 0, 1, 2, 3)
-    const uint8_t opOffsets[4] = {0, 8, 4, 12};
-
-    for (int i = 0; i < 4; i++) {
-        uint8_t regOff = opOffsets[i];
-        const FMOperator& op = patch.op[i];
-
-        // Detune needs adjustment: TFI stores 0-7, chip expects 0-7 but centered at 3
-        uint8_t dt = op.dt;
-
-        board.writeYM2612(port, 0x30 + regOff + chReg, (dt << 4) | op.mul);
-        board.writeYM2612(port, 0x40 + regOff + chReg, op.tl);
-        board.writeYM2612(port, 0x50 + regOff + chReg, (op.rs << 6) | op.ar);
-        board.writeYM2612(port, 0x60 + regOff + chReg, op.dr);
-        board.writeYM2612(port, 0x70 + regOff + chReg, op.sr);
-        board.writeYM2612(port, 0x80 + regOff + chReg, (op.sl << 4) | op.rr);
-        board.writeYM2612(port, 0x90 + regOff + chReg, op.ssg);
-    }
+void writeFMPatch(uint8_t ch, const struct FMPatch& patch) {
+    FMPatchUtils::loadToChannel(board, ch, patch);
 }
 
 void loadDefaultPatches() {

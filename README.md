@@ -26,6 +26,7 @@ The `hardware/` directory contains KiCad schematics and PCB files.
   - SD card for large music libraries
   - Serial streaming from PC
   - Real-time streaming from emulators (BlastEm)
+- **Synthesis Utilities** — Direct chip control for custom sounds, MIDI synths, and sound effects
 - **Cross-Platform** — Teensy 4.x, ESP32, Arduino Mega/Uno, and more
 - **VGZ Support** — Native decompression on Teensy/ESP32
 - **PCM/DAC Support** — Sampled drums and vocals on YM2612 channel 6
@@ -162,7 +163,8 @@ Stream audio directly from BlastEm or other Genesis emulators to hear games on r
 - **SDCardPlayer** — SD card player with serial menu
 - **SerialStreaming** — Stream music from PC over USB
 - **EmulatorBridge** — Real-time audio from Genesis emulators
-- **MIDISynth** — Use the board as a MIDI synthesizer
+- **SimpleSynth** — Direct chip control demo using synthesis utilities
+- **MIDISynth** — Full MIDI synthesizer with voice allocation and patch management
 
 ## Tools
 
@@ -173,6 +175,50 @@ Each example includes relevant Python tools:
 | `vgm2header.py` | examples/BasicPlayback/ | Convert VGM/VGZ to C header files |
 | `vgm_prep.py` | examples/SDCardPlayer/ | Prepare VGM for SD (decompress, strip DAC) |
 | `stream_vgm.py` | examples/SerialStreaming/ | Stream VGM from PC to board |
+
+## Synthesis Utilities
+
+For direct chip control without VGM playback, the library includes synthesis utilities in `synth/`:
+
+```cpp
+#include <GenesisBoard.h>
+#include <synth/FMPatch.h>
+#include <synth/FMFrequency.h>
+#include <synth/PSGFrequency.h>
+#include <synth/DefaultPatches.h>
+
+GenesisBoard board(2, 3, 4, 5, 6, 13, 11);
+FMPatch patch;
+
+void setup() {
+    board.begin();
+
+    // Load a built-in FM patch
+    memcpy_P(&patch, &defaultFMPatches[0], sizeof(FMPatch));
+    FMPatchUtils::loadToChannel(board, 0, patch);
+}
+
+void playNote(uint8_t note) {
+    FMFrequency::writeToChannel(board, 0, note);
+    FMFrequency::keyOn(board, 0);
+}
+
+void stopNote() {
+    FMFrequency::keyOff(board, 0);
+}
+```
+
+### Available Modules
+
+| Header | Description |
+|--------|-------------|
+| `synth/FMFrequency.h` | MIDI note to YM2612 frequency conversion, key on/off |
+| `synth/PSGFrequency.h` | MIDI note to PSG tone values, volume control |
+| `synth/FMPatch.h` | FM patch structure and loading utilities |
+| `synth/PSGEnvelope.h` | Software envelope generator for PSG |
+| `synth/DefaultPatches.h` | 8 built-in FM patches and 4 PSG envelopes |
+
+See the **SimpleSynth** example for a complete demo, or **MIDISynth** for a full synthesizer implementation.
 
 ## License
 
