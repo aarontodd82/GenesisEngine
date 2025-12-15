@@ -48,7 +48,7 @@ from pathlib import Path
 # Limits are conservative to leave room for code and libraries
 PLATFORM_LIMITS = {
     'uno': 16 * 1024,         # 32KB flash total, ~14KB for GenesisEngine library
-    'mega': 28 * 1024,        # 32KB per-array limit, leave margin for code
+    'mega': 60 * 1024,        # Must stay under 64KB for 16-bit PROGMEM pointers
     'teensy40': 1536 * 1024,  # 2MB total, leave 512KB for code
     'teensy41': 7 * 1024 * 1024,  # 8MB total, leave 1MB for code
     'esp32': 2 * 1024 * 1024, # 4MB typical, leave 2MB for code/OTA
@@ -977,32 +977,15 @@ def convert_file(input_path: str, output_path: str = None, name: str = None,
         print(f"Downsampling DAC to 1/{dac_rate} rate...")
         data = downsample_dac_data(data, dac_rate)
 
-    # Determine if we need chunked output for AVR
-    # Mega has 256KB flash, can use chunked arrays to store much more
-    # Uno has 32KB flash, chunking doesn't help much
-    use_chunked = False
+    # Always use chunked format for consistency across platforms
+    use_chunked = True
     if platform:
         platform = platform.lower()
-
-    # For mega, allow up to 200KB with chunking
-    # For other AVR or small platforms, use single-array limits
-    AVR_CHUNKED_LIMITS = {
-        'mega': 200 * 1024,  # 200KB with chunking (256KB flash - 56KB for code)
-        'uno': 24 * 1024,    # Uno can't benefit from chunking (only 32KB total)
-    }
-
-    # Always use chunked format for consistency across platforms
-    # This allows the same playChunked() API everywhere
-    use_chunked = True
 
     max_size = None
     if platform:
         if platform not in PLATFORM_LIMITS:
             print(f"Warning: Unknown platform '{platform}'. Available: {', '.join(PLATFORM_LIMITS.keys())}", file=sys.stderr)
-        elif platform == 'mega' and len(data) > PLATFORM_LIMITS['mega']:
-            # Mega with large file - allow up to 200KB
-            max_size = AVR_CHUNKED_LIMITS['mega']
-            print(f"Using chunked storage for Mega (up to {max_size // 1024}KB)")
         else:
             max_size = PLATFORM_LIMITS[platform]
 

@@ -157,6 +157,8 @@ Stream audio directly from BlastEm or other Genesis emulators to hear games on r
 
 **Teensy 4.x is recommended**, especially for SD card playback. It offers fast GPIO, large memory, and built-in SD on the 4.1.
 
+**Arduino Uno/Mega Limitation:** Due to AVR's 16-bit PROGMEM addressing, flash playback is limited to ~16KB (Uno) or ~60KB (Mega). Use `--strip-dac` when converting, or use SD card playback for larger files. See the BasicPlayback example README for details.
+
 *Mega SD support requires software SPI for the shift register due to pin conflicts. Results may vary—some VGM files with heavy DAC usage may have timing issues.
 
 ## Examples
