@@ -4,6 +4,8 @@ Play VGM/VGZ files from flash memory using the Genesis Engine library.
 
 ## Quick Start
 
+A sample file `greenhill.vgz` is included. Convert it first:
+
 1. **Convert your VGM file:**
    ```
    python vgm2header.py your_song.vgz
