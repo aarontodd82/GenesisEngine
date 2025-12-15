@@ -12,7 +12,7 @@
 #if GENESIS_ENGINE_USE_SD
 #include "sources/SDSource.h"
 #endif
-#if GENESIS_ENGINE_USE_VGZ
+#if GENESIS_ENGINE_USE_VGZ && GENESIS_ENGINE_USE_SD
 #include "sources/VGZSource.h"
 #endif
 
@@ -146,7 +146,7 @@ private:
 #if GENESIS_ENGINE_USE_SD
   SDSource sdSource_;
 #endif
-#if GENESIS_ENGINE_USE_VGZ
+#if GENESIS_ENGINE_USE_VGZ && GENESIS_ENGINE_USE_SD
   VGZSource vgzSource_;
 #endif
 

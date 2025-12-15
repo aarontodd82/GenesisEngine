@@ -48,17 +48,19 @@ The `hardware/` directory contains KiCad schematics and PCB files.
 
 Connect the Genesis Engine board to your microcontroller.
 
-| Board Pin | Function | Default | Configurable? |
-|-----------|----------|---------|---------------|
-| WR_P | PSG write strobe (active low) | 2 | Yes |
-| WR_Y | YM2612 write strobe (active low) | 3 | Yes |
-| IC_Y | YM2612 reset (active low) | 4 | Yes |
-| A0_Y | YM2612 address/data select | 5 | Yes |
-| A1_Y | YM2612 port select | 6 | Yes |
-| SCK | Shift register clock | SPI | See below |
-| SDI | Shift register data (MOSI) | SPI | See below |
-| VCC | 5V power | — | — |
-| GND | Ground | — | — |
+| Board Pin | Function | Arduino/Teensy | ESP32 | Configurable? |
+|-----------|----------|----------------|-------|---------------|
+| WR_P | PSG write strobe (active low) | 2 | 16 | Yes |
+| WR_Y | YM2612 write strobe (active low) | 3 | 17 | Yes |
+| IC_Y | YM2612 reset (active low) | 4 | 25 | Yes |
+| A0_Y | YM2612 address/data select | 5 | 26 | Yes |
+| A1_Y | YM2612 port select | 6 | 27 | Yes |
+| SCK | Shift register clock | SPI | SPI | See below |
+| SDI | Shift register data (MOSI) | SPI | SPI | See below |
+| VCC | 5V power | — | — | — |
+| GND | Ground | — | — | — |
+
+**ESP32 Note:** GPIO 0-3 (boot/serial), 6-11 (flash), and 12/15 (boot strapping) must be avoided. The defaults above are safe for ESP32-WROOM-32 dev boards.
 
 **SPI Pins** — By default, the library uses hardware SPI for fast data transfer. These pins are fixed per board:
 

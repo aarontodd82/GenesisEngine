@@ -5,10 +5,13 @@
 // Free Memory Detection (cross-platform)
 // =============================================================================
 
-#ifdef __arm__
+#if defined(PLATFORM_ESP32)
+// ESP32 - use ESP-IDF heap functions
+#include <esp_heap_caps.h>
+#elif defined(__arm__)
 // ARM platforms (Teensy, Due, etc.)
 extern "C" char* sbrk(int incr);
-#else
+#elif defined(ARDUINO_ARCH_AVR)
 // AVR platforms
 extern char *__brkval;
 extern char *__malloc_heap_start;
@@ -25,13 +28,21 @@ extern "C" void extmem_free(void* ptr);
 #endif
 
 int PCMDataBank::getFreeMemory() {
+#if defined(PLATFORM_ESP32)
+  return heap_caps_get_free_size(MALLOC_CAP_8BIT);
+#elif defined(__arm__)
   char top;
-#ifdef __arm__
   return &top - reinterpret_cast<char*>(sbrk(0));
-#elif defined(CORE_TEENSY) || (ARDUINO > 103 && ARDUINO != 151)
-  return &top - __brkval;
+#elif defined(ARDUINO_ARCH_AVR)
+  char top;
+  #if defined(CORE_TEENSY) || (ARDUINO > 103 && ARDUINO != 151)
+    return &top - __brkval;
+  #else
+    return __brkval ? &top - __brkval : &top - __malloc_heap_start;
+  #endif
 #else
-  return __brkval ? &top - __brkval : &top - __malloc_heap_start;
+  // Unknown platform - return a conservative estimate
+  return 4096;
 #endif
 }
 

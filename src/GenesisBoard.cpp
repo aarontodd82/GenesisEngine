@@ -4,6 +4,9 @@
 
 #if defined(PLATFORM_ESP32)
 #include "soc/gpio_struct.h"
+// ESP32 doesn't have delayNanoseconds - use 1µs minimum delay
+// 200ns rounds up to 1µs which is still fast enough for YM2612 timing
+#define delayNanoseconds(ns) delayMicroseconds(1)
 #endif
 
 // Use hardware SPI for shift register (much faster than bit-banging)
@@ -319,7 +322,7 @@ void GenesisBoard::writePSG(uint8_t val) {
   *portSetWR_P_ = maskWR_P_;
 #elif defined(PLATFORM_ESP32)
   GPIO.out_w1tc = (1 << pinWR_P_cached_);
-  delayMicroseconds(4);  // ESP32 needs some delay
+  delayMicroseconds(8);  // PSG needs full 8µs pulse width
   GPIO.out_w1ts = (1 << pinWR_P_cached_);
 #else
   digitalWrite(pinWR_P_, LOW);

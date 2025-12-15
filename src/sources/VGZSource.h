@@ -3,8 +3,9 @@
 
 #include "../config/feature_config.h"
 
-// Only compile if VGZ support is enabled
-#if GENESIS_ENGINE_USE_VGZ
+// Only compile if BOTH VGZ and SD support are enabled
+// VGZSource streams compressed VGZ files from SD card
+#if GENESIS_ENGINE_USE_VGZ && GENESIS_ENGINE_USE_SD
 
 #include "VGMSource.h"
 #include <SD.h>
@@ -102,5 +103,5 @@ private:
 // Global pointer for uzlib callback (uzlib doesn't support user data)
 extern VGZSource* g_streamingVGZSource;
 
-#endif // GENESIS_ENGINE_USE_VGZ
+#endif // GENESIS_ENGINE_USE_VGZ && GENESIS_ENGINE_USE_SD
 #endif // VGZ_SOURCE_H

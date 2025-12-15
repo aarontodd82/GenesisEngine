@@ -1,6 +1,6 @@
 #include "VGZSource.h"
 
-#if GENESIS_ENGINE_USE_VGZ
+#if GENESIS_ENGINE_USE_VGZ && GENESIS_ENGINE_USE_SD
 
 #include <string.h>
 
@@ -517,4 +517,4 @@ int VGZSource::streamingReadCallback(uzlib_uncomp* uncomp) {
   return *uncomp->source++;
 }
 
-#endif // GENESIS_ENGINE_USE_VGZ
+#endif // GENESIS_ENGINE_USE_VGZ && GENESIS_ENGINE_USE_SD

@@ -26,15 +26,30 @@
 // =============================================================================
 // Pin Configuration
 // Adjust these to match your wiring to the FM-90s Genesis Engine board
+//
+// NOTE: SCK/SDI are ignored when using hardware SPI (default).
+//       Hardware SPI pins: Uno=13/11, Mega=52/51, Teensy4=13/11, ESP32=18/23
 // =============================================================================
 
-const uint8_t PIN_WR_P = 2;   // WR_P - SN76489 (PSG) write strobe
-const uint8_t PIN_WR_Y = 3;   // WR_Y - YM2612 write strobe
-const uint8_t PIN_IC_Y = 4;   // IC_Y - YM2612 reset
-const uint8_t PIN_A0_Y = 5;   // A0_Y - YM2612 address bit 0
-const uint8_t PIN_A1_Y = 6;   // A1_Y - YM2612 address bit 1 (port select)
-const uint8_t PIN_SCK  = 7;   // SCK  - Shift register clock (CD74HCT164E)
-const uint8_t PIN_SDI  = 8;   // SDI  - Shift register data
+#if defined(ARDUINO_ARCH_ESP32)
+  // ESP32: Avoid GPIO 0-3 (boot/serial), 6-11 (flash), 12/15 (boot strapping)
+  const uint8_t PIN_WR_P = 16;  // WR_P - SN76489 (PSG) write strobe
+  const uint8_t PIN_WR_Y = 17;  // WR_Y - YM2612 write strobe
+  const uint8_t PIN_IC_Y = 25;  // IC_Y - YM2612 reset
+  const uint8_t PIN_A0_Y = 26;  // A0_Y - YM2612 address bit 0
+  const uint8_t PIN_A1_Y = 27;  // A1_Y - YM2612 address bit 1 (port select)
+  const uint8_t PIN_SCK  = 18;  // SCK  - Hardware SPI (fixed on ESP32)
+  const uint8_t PIN_SDI  = 23;  // SDI  - Hardware SPI (fixed on ESP32)
+#else
+  // Arduino/Teensy defaults
+  const uint8_t PIN_WR_P = 2;   // WR_P - SN76489 (PSG) write strobe
+  const uint8_t PIN_WR_Y = 3;   // WR_Y - YM2612 write strobe
+  const uint8_t PIN_IC_Y = 4;   // IC_Y - YM2612 reset
+  const uint8_t PIN_A0_Y = 5;   // A0_Y - YM2612 address bit 0
+  const uint8_t PIN_A1_Y = 6;   // A1_Y - YM2612 address bit 1 (port select)
+  const uint8_t PIN_SCK  = 7;   // SCK  - Shift register clock (ignored w/ HW SPI)
+  const uint8_t PIN_SDI  = 8;   // SDI  - Shift register data (ignored w/ HW SPI)
+#endif
 
 // =============================================================================
 // Create player objects
