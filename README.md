@@ -26,8 +26,8 @@ The `hardware/` directory contains KiCad schematics and PCB files.
   - SD card for large music libraries
   - Serial streaming from PC
   - Real-time streaming from emulators (BlastEm)
-- **Cross-Platform** — Teensy 4.x, ESP32, RP2040, AVR boards, and more
-- **Compressed Formats** — Native VGZ support, plus custom GEP format (2-4x smaller)
+- **Cross-Platform** — Teensy 4.x, ESP32, Arduino Mega/Uno, and more
+- **VGZ Support** — Native decompression on Teensy/ESP32
 - **PCM/DAC Support** — Sampled drums and vocals on YM2612 channel 6
 - **Smart Memory Management** — Automatically adapts to your board's capabilities
 
@@ -122,24 +122,17 @@ void loop() {
 Store music directly in your microcontroller's flash. Convert VGM files with the included tool:
 
 ```bash
-python tools/vgm2header.py song.vgm -o song.h
-```
-
-### GEP Format (Compressed)
-For memory-constrained boards, the GEP format provides 2-4x compression:
-
-```bash
-python tools/vgm2gep.py song.vgm -o song_gep.h
+python examples/BasicPlayback/vgm2header.py song.vgm
 ```
 
 ### SD Card
-Play VGM and VGZ files directly from SD. The SDCardPlayer example includes an interactive serial menu for browsing and playback control.
+Play VGM and VGZ files directly from SD. The SDCardPlayer example includes an interactive serial menu for browsing and playback control. Works best on Teensy or ESP32. Mega has limited support (see Platform Notes). Not supported on Arduino Uno due to RAM limits.
 
 ### Serial Streaming
 Stream VGM files from your PC in real-time:
 
 ```bash
-python tools/stream_vgm.py song.vgm
+python examples/SerialStreaming/stream_vgm.py song.vgm
 ```
 
 ### Emulator Bridge
@@ -157,26 +150,27 @@ Stream audio directly from BlastEm or other Genesis emulators to hear games on r
 
 **Teensy 4.x is recommended**, especially for SD card playback. It offers fast GPIO, large memory, and built-in SD on the 4.1.
 
-**Arduino Uno/Mega Limitation:** Due to AVR's 16-bit PROGMEM addressing, flash playback is limited to ~16KB (Uno) or ~60KB (Mega). Use `--strip-dac` when converting, or use SD card playback for larger files. See the BasicPlayback example README for details.
+**Arduino Uno/Mega Limitation:** Due to AVR's 16-bit PROGMEM addressing, flash playback is limited to ~16KB (Uno) or ~60KB (Mega). Use `--strip-dac` when converting to fit more music. Uno does not support SD card (insufficient RAM). See the BasicPlayback example README for details.
 
 *Mega SD support requires software SPI for the shift register due to pin conflicts. Results may vary—some VGM files with heavy DAC usage may have timing issues.
 
 ## Examples
 
 - **BasicPlayback** — VGM playback from flash memory
-- **GEPPlayback** — Compressed format for smaller boards
 - **SDCardPlayer** — SD card player with serial menu
 - **SerialStreaming** — Stream music from PC over USB
 - **EmulatorBridge** — Real-time audio from Genesis emulators
+- **MIDISynth** — Use the board as a MIDI synthesizer
 
 ## Tools
 
-| Tool | Description |
-|------|-------------|
-| `vgm2header.py` | Convert VGM/VGZ to C header files |
-| `vgm2gep.py` | Convert to compressed GEP format |
-| `vgm_prep.py` | Prepare VGM files (inline DAC, reduce sample rate) |
-| `stream_vgm.py` | Stream VGM from PC to board |
+Each example includes relevant Python tools:
+
+| Tool | Location | Description |
+|------|----------|-------------|
+| `vgm2header.py` | examples/BasicPlayback/ | Convert VGM/VGZ to C header files |
+| `vgm_prep.py` | examples/SDCardPlayer/ | Prepare VGM for SD (decompress, strip DAC) |
+| `stream_vgm.py` | examples/SerialStreaming/ | Stream VGM from PC to board |
 
 ## License
 
