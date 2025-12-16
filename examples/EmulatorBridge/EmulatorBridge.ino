@@ -53,7 +53,7 @@
   #define BUFFER_SIZE 32768
   #define BUFFER_MASK 0x7FFF
   #define BUFFER_FILL_BEFORE_PLAY 0
-#elif defined(ESP32)
+#elif defined(ARDUINO_ARCH_ESP32)
   #define BOARD_TYPE 5  // ESP32
   #define BUFFER_SIZE 16384
   #define BUFFER_MASK 0x3FFF
@@ -86,9 +86,9 @@
 
 // Microseconds per sample at 44100 Hz (fixed-point: 22.68us ≈ 23us)
 // For better accuracy: 1000000 / 44100 = 22.6757...
-// AVR: Use fast multiply approximation (division is very slow on 8-bit)
+// AVR/ESP32: Use fast multiply approximation (division causes timing jitter on ESP32)
 // Teensy: Use accurate division (fast 32-bit math)
-#if defined(__AVR__)
+#if defined(__AVR__) || defined(ARDUINO_ARCH_ESP32)
   #define SAMPLES_TO_MICROS(s) ((uint32_t)(s) * 23UL)
 #else
   #define SAMPLES_TO_MICROS(s) ((uint32_t)(s) * 1000000UL / 44100UL)
@@ -202,8 +202,16 @@ void setup() {
   // Initialize board FIRST - silence chips immediately
   board.begin();
 
+#if defined(ARDUINO_ARCH_ESP32)
+  Serial.setRxBufferSize(4096);  // Must be called before begin()
+#endif
   Serial.begin(SERIAL_BAUD);
+#if defined(ARDUINO_ARCH_ESP32)
+  Serial.setTimeout(0);  // Non-blocking for readBytes()
+#endif
+#if !defined(ARDUINO_ARCH_ESP32)
   while (!Serial) { }
+#endif
 
   // Brief delay for serial to stabilize, then drain any garbage
   delay(100);
@@ -222,9 +230,37 @@ void setup() {
 uint8_t getCommandSize(uint8_t cmd);
 int32_t processCommand();
 
+#if defined(ARDUINO_ARCH_ESP32)
+// ESP32: Bulk read buffer to reduce per-byte Serial.read() overhead
+#define ESP32_SERIAL_BUF_SIZE 256
+uint8_t esp32SerialBuf[ESP32_SERIAL_BUF_SIZE];
+uint8_t esp32SerialBufPos = 0;
+uint8_t esp32SerialBufLen = 0;
+
+inline int16_t esp32GetByte() {
+  if (esp32SerialBufPos >= esp32SerialBufLen) {
+    int avail = Serial.available();
+    if (avail <= 0) return -1;
+    esp32SerialBufLen = Serial.readBytes(esp32SerialBuf,
+                          min(avail, (int)ESP32_SERIAL_BUF_SIZE));
+    esp32SerialBufPos = 0;
+    if (esp32SerialBufLen == 0) return -1;
+  }
+  return esp32SerialBuf[esp32SerialBufPos++];
+}
+
+inline bool esp32DataAvailable() {
+  return (esp32SerialBufPos < esp32SerialBufLen) || (Serial.available() > 0);
+}
+#endif
+
 void receiveData() {
   // Read all available bytes directly into ring buffer
+#if defined(ARDUINO_ARCH_ESP32)
+  while (esp32DataAvailable()) {
+#else
   while (Serial.available() > 0) {
+#endif
 #if BUFFER_FILL_BEFORE_PLAY == 0
     // Teensy: If buffer is getting full, try to process commands first
     while (ringFree() < 64 && !ringEmpty()) {
@@ -249,7 +285,13 @@ void receiveData() {
       return;  // Buffer full - stop reading until we process more
     }
 
+#if defined(ARDUINO_ARCH_ESP32)
+    int16_t result = esp32GetByte();
+    if (result < 0) break;
+    uint8_t b = (uint8_t)result;
+#else
     uint8_t b = Serial.read();
+#endif
     lastActivityTime = millis();
 
     // Handle PING - 0xAA is not a valid VGM command, so safe to check anytime
@@ -257,6 +299,9 @@ void receiveData() {
     if (b == CMD_PING && !connected) {
       board.reset();
       ringHead = ringTail = 0;
+#if defined(ARDUINO_ARCH_ESP32)
+      esp32SerialBufPos = esp32SerialBufLen = 0;  // Clear bulk buffer
+#endif
       connected = true;
       nextCommandTime = 0;      // Will be set when playback starts
 #if BUFFER_FILL_BEFORE_PLAY > 0
