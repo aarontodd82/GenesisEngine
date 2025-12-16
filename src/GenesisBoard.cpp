@@ -4,17 +4,23 @@
 
 #if defined(PLATFORM_ESP32)
 #include "soc/gpio_struct.h"
-// ESP32 doesn't have delayNanoseconds - use 1µs minimum delay
-// 200ns rounds up to 1µs which is still fast enough for YM2612 timing
-#define delayNanoseconds(ns) delayMicroseconds(1)
+// ESP32 runs at 240MHz = 4.17ns per cycle. A few NOPs provide sub-microsecond delays.
+// 200ns ≈ 48 cycles, but function call overhead helps, so ~20 NOPs is enough
+static inline void delayNanoseconds(uint32_t ns) __attribute__((always_inline));
+static inline void delayNanoseconds(uint32_t ns) {
+  if (ns < 50) return;  // Too short to matter
+  // Each NOP is ~4ns at 240MHz. Rough approximation.
+  uint32_t cycles = ns / 20;
+  while (cycles--) { __asm__ __volatile__("nop"); }
+}
 #endif
 
 // Use hardware SPI for shift register (much faster than bit-banging)
 // Set to 0 to use software bit-banging on custom pins
-// Automatically disabled on AVR when SD card support is enabled to avoid
+// Automatically disabled on AVR/ESP32 when SD card support is enabled to avoid
 // SPI bus conflict (shift register has no CS pin, would receive garbage
 // during SD communication)
-#if defined(PLATFORM_AVR) && GENESIS_ENGINE_USE_SD
+#if (defined(PLATFORM_AVR) || defined(PLATFORM_ESP32)) && GENESIS_ENGINE_USE_SD
   #define USE_HARDWARE_SPI 0
 #else
   #define USE_HARDWARE_SPI 1

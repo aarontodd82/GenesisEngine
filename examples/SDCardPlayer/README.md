@@ -45,6 +45,37 @@ SD card uses Mega's hardware SPI:
 
 Uses the built-in SD card slot - no SD wiring needed. Genesis board can use the default hardware SPI pins since there's no conflict.
 
+### ESP32 - Full Support
+
+ESP32 works great with SD cards, but requires **different shift register pins** than other examples. The SD card needs the hardware SPI bus, and since the shift register has no chip select, they cannot share pins.
+
+⚠️ **IMPORTANT:** The shift register pins are DIFFERENT from SerialStreaming and other examples!
+
+| Genesis Engine Board | ESP32 GPIO |
+|---------------------|------------|
+| WR_P (PSG write)    | 16         |
+| WR_Y (YM2612 write) | 17         |
+| IC_Y (YM2612 reset) | 25         |
+| A0_Y (YM2612 addr)  | 26         |
+| A1_Y (YM2612 port)  | 27         |
+| **Shift CLK**       | **4** ⚠️   |
+| **Shift DATA**      | **13** ⚠️  |
+
+⚠️ **Do NOT use GPIO 18/23 for shift register!** Those are used by the SD card.
+
+SD card uses ESP32's hardware SPI (VSPI):
+
+| SD Card Module | ESP32 GPIO |
+|----------------|------------|
+| CS             | 5          |
+| MOSI           | 23         |
+| MISO           | 19         |
+| SCK            | 18         |
+| VCC            | 3.3V or 5V (check your module) |
+| GND            | GND        |
+
+**PlatformIO users:** Use the `esp32_sd` environment, not `esp32`.
+
 ---
 
 ## How to Use

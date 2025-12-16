@@ -157,6 +157,8 @@ Stream audio directly from BlastEm or other Genesis emulators to hear games on r
 
 *Mega SD support requires software SPI for the shift register due to pin conflicts. Results may vary—some VGM files with heavy DAC usage may have timing issues.
 
+**ESP32 SD Note:** When using SD cards on ESP32, the shift register must use different pins (GPIO 4/13) than other examples (GPIO 18/23) because the SD card needs the hardware SPI bus. See the SDCardPlayer README for full wiring details.
+
 ## Examples
 
 - **BasicPlayback** — VGM playback from flash memory

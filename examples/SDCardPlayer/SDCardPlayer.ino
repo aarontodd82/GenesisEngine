@@ -46,6 +46,24 @@
  *   Uses built-in SD slot (no SD wiring needed)
  *   Genesis board can use hardware SPI (default pins) - no conflict
  *
+ * ESP32 PINOUT:
+ *   Genesis Engine Board (software SPI - avoids SD card conflict):
+ *     WR_P (PSG write)    -> GPIO 16
+ *     WR_Y (YM2612 write) -> GPIO 17
+ *     IC_Y (YM2612 reset) -> GPIO 25
+ *     A0_Y (YM2612 addr)  -> GPIO 26
+ *     A1_Y (YM2612 port)  -> GPIO 27
+ *     Shift CLK           -> GPIO 4   *** NOT 18! (SD uses hardware SPI) ***
+ *     Shift DATA          -> GPIO 13  *** NOT 23! (SD uses hardware SPI) ***
+ *
+ *   SD Card Module (hardware SPI - VSPI):
+ *     CS                  -> GPIO 5
+ *     MOSI                -> GPIO 23
+ *     MISO                -> GPIO 19
+ *     SCK                 -> GPIO 18
+ *     VCC                 -> 3.3V (NOT 5V!)
+ *     GND                 -> GND
+ *
  * =============================================================================
  *
  * SD Card Contents:
@@ -100,8 +118,8 @@
   const uint8_t PIN_IC_Y = 25;  // IC_Y - YM2612 reset
   const uint8_t PIN_A0_Y = 26;  // A0_Y - YM2612 address bit 0
   const uint8_t PIN_A1_Y = 27;  // A1_Y - YM2612 address bit 1 (port select)
-  const uint8_t PIN_SCK  = 18;  // SCK  - Hardware SPI (fixed on ESP32)
-  const uint8_t PIN_SDI  = 23;  // SDI  - Hardware SPI (fixed on ESP32)
+  const uint8_t PIN_SCK  = 4;   // Shift CLK - Software SPI (GPIO<32 for direct register access)
+  const uint8_t PIN_SDI  = 13;  // Shift DATA - Software SPI (GPIO<32 for direct register access)
 #else
   // Teensy / Arduino defaults
   const uint8_t PIN_WR_P = 2;   // WR_P - SN76489 (PSG) write strobe
