@@ -57,6 +57,13 @@
   #define BUFFER_FILL_BEFORE_PLAY 3072
   #define CHUNKS_IN_FLIGHT 1
   #define BOARD_TYPE 4  // Teensy 4.x
+#elif defined(ARDUINO_ARCH_ESP32)
+  #define BUFFER_SIZE 4096
+  #define BUFFER_MASK 0xFFF
+  #define CHUNK_SIZE 128  // Larger chunks now that serial overhead is fixed
+  #define BUFFER_FILL_BEFORE_PLAY 3072
+  #define CHUNKS_IN_FLIGHT 1
+  #define BOARD_TYPE 5  // ESP32
 #else
   #define BUFFER_SIZE 4096
   #define BUFFER_MASK 0xFFF
@@ -73,15 +80,25 @@
 // Pin Configuration
 // =============================================================================
 
-const uint8_t PIN_WR_P = 2;
-const uint8_t PIN_WR_Y = 3;
-const uint8_t PIN_IC_Y = 4;
-const uint8_t PIN_A0_Y = 5;
-const uint8_t PIN_A1_Y = 6;
-
-// Software SPI pins (only used if USE_HARDWARE_SPI is disabled in GenesisBoard.cpp)
-const uint8_t PIN_SCK  = 7;
-const uint8_t PIN_SDI  = 8;
+#if defined(ARDUINO_ARCH_ESP32)
+  // ESP32: Avoid GPIO 0-3 (boot/serial), 6-11 (flash), 12/15 (boot strapping)
+  const uint8_t PIN_WR_P = 16;
+  const uint8_t PIN_WR_Y = 17;
+  const uint8_t PIN_IC_Y = 25;
+  const uint8_t PIN_A0_Y = 26;
+  const uint8_t PIN_A1_Y = 27;
+  const uint8_t PIN_SCK  = 18;  // Hardware SPI (fixed)
+  const uint8_t PIN_SDI  = 23;  // Hardware SPI (fixed)
+#else
+  const uint8_t PIN_WR_P = 2;
+  const uint8_t PIN_WR_Y = 3;
+  const uint8_t PIN_IC_Y = 4;
+  const uint8_t PIN_A0_Y = 5;
+  const uint8_t PIN_A1_Y = 6;
+  // Software SPI pins (only used if USE_HARDWARE_SPI is disabled)
+  const uint8_t PIN_SCK  = 7;
+  const uint8_t PIN_SDI  = 8;
+#endif
 
 // =============================================================================
 // Ring Buffer
@@ -150,8 +167,17 @@ void setup() {
   // Initialize board FIRST - silence chips immediately on power-up
   board.begin();
 
+#if defined(ARDUINO_ARCH_ESP32)
+  Serial.setRxBufferSize(4096);  // Must be called before begin()
+#endif
   Serial.begin(SERIAL_BAUD);
+#if defined(ARDUINO_ARCH_ESP32)
+  Serial.setTimeout(0);  // Non-blocking for readBytes()
+#endif
+#if !defined(ARDUINO_ARCH_ESP32)
+  // Wait for USB serial on native USB boards (not needed on ESP32)
   while (!Serial) { }
+#endif
 
   // Wait for serial to stabilize, then drain garbage
   delay(100);
@@ -170,6 +196,9 @@ void setup() {
         break;
       }
     }
+#if defined(ARDUINO_ARCH_ESP32)
+    yield();  // Feed watchdog on ESP32
+#endif
   }
 }
 
@@ -186,11 +215,60 @@ uint8_t rxChecksum = 0;
 uint8_t rxTempBuf[CHUNK_SIZE];
 uint8_t chunksReceived = 0;  // Count chunks for pipelined ACK
 
+#if defined(ARDUINO_ARCH_ESP32)
+// ESP32: Bulk read buffer to reduce per-byte Serial.read() overhead
+// Each Serial.read() call on ESP32 involves FreeRTOS queue operations
+// which add significant overhead when called thousands of times per second
+#define ESP32_SERIAL_BUF_SIZE 256
+uint8_t esp32SerialBuf[ESP32_SERIAL_BUF_SIZE];
+uint8_t esp32SerialBufPos = 0;
+uint8_t esp32SerialBufLen = 0;
+
+// ESP32: Disabled yield - testing if watchdog triggers
+// yield() triggers a task switch which causes timing jitter
+inline void esp32ThrottledYield() {
+  // Intentionally empty - testing without yield
+  // If watchdog resets occur, we'll need to re-enable with throttling
+}
+
+// Get next byte from ESP32 bulk buffer (refills automatically)
+// Returns -1 if no data available
+inline int16_t esp32GetByte() {
+  if (esp32SerialBufPos >= esp32SerialBufLen) {
+    // Buffer empty - try to refill
+    int avail = Serial.available();
+    if (avail <= 0) return -1;
+
+    // Read up to buffer size
+    esp32SerialBufLen = Serial.readBytes(esp32SerialBuf,
+                          min(avail, (int)ESP32_SERIAL_BUF_SIZE));
+    esp32SerialBufPos = 0;
+
+    if (esp32SerialBufLen == 0) return -1;
+  }
+  return esp32SerialBuf[esp32SerialBufPos++];
+}
+
+// Check if data is available (either in buffer or serial)
+inline bool esp32DataAvailable() {
+  return (esp32SerialBufPos < esp32SerialBufLen) || (Serial.available() > 0);
+}
+#endif
+
 // Process incoming serial data - completely non-blocking
 // Call this frequently from loop()
 void receiveData() {
+#if defined(ARDUINO_ARCH_ESP32)
+  // ESP32: Use bulk reading to reduce FreeRTOS queue overhead
+  // This is critical for maintaining correct playback timing
+  while (esp32DataAvailable()) {
+    int16_t result = esp32GetByte();
+    if (result < 0) break;
+    uint8_t b = (uint8_t)result;
+#else
   while (Serial.available() > 0) {
     uint8_t b = Serial.read();
+#endif
     lastDataTime = millis();  // Track when we last received data
 
     switch (rxState) {
@@ -204,6 +282,9 @@ void receiveData() {
           chunksReceived = 0;
           nextCommandTime = 0;
           state = WAITING;
+#if defined(ARDUINO_ARCH_ESP32)
+          esp32SerialBufPos = esp32SerialBufLen = 0;  // Clear bulk buffer
+#endif
           Serial.write(CMD_ACK);
           Serial.write(BOARD_TYPE);
           Serial.write(FLOW_READY);
@@ -246,11 +327,21 @@ void receiveData() {
         rxChecksum ^= b;
 
         // Bulk read remaining bytes if available
+#if defined(ARDUINO_ARCH_ESP32)
+        while (rxCount < rxLength && esp32DataAvailable()) {
+          int16_t result = esp32GetByte();
+          if (result < 0) break;
+          rxTempBuf[rxCount] = (uint8_t)result;
+          rxChecksum ^= rxTempBuf[rxCount];
+          rxCount++;
+        }
+#else
         while (rxCount < rxLength && Serial.available() > 0) {
           uint8_t d = Serial.read();
           rxTempBuf[rxCount++] = d;
           rxChecksum ^= d;
         }
+#endif
 
         if (rxCount >= rxLength) {
           rxState = RX_AWAITING_CHECKSUM;
@@ -461,13 +552,11 @@ void updatePlayback() {
       // Teensy 4.x: Use accurate division (fast 32-bit math)
       uint32_t waitUs = (uint32_t)result * 1000000UL / 44100UL;
 #else
-      // AVR: Use fast approximation, samples * 23 ≈ samples * 22.676 (error < 1.5%)
+      // AVR/ESP32: Use fast approximation, samples * 23 ≈ samples * 22.676 (error < 1.5%)
       uint32_t waitUs = (uint32_t)result * 23UL;
 #endif
 
       // Smart catch-up: add wait to scheduled time, not current time
-      // This prevents accumulating drift. If we're behind, we stay behind
-      // but don't fall further behind.
       nextCommandTime += waitUs;
 
       // If we're behind at all, snap to now (don't try to catch up)
@@ -494,6 +583,10 @@ void updatePlayback() {
 void loop() {
   // Always receive data - it's non-blocking now
   receiveData();
+
+#if defined(ARDUINO_ARCH_ESP32)
+  esp32ThrottledYield();  // Occasional yield to prevent watchdog reset
+#endif
 
   switch (state) {
     case WAITING:
@@ -530,6 +623,9 @@ void loop() {
       rxState = RX_IDLE;
       chunksReceived = 0;
       nextCommandTime = 0;
+#if defined(ARDUINO_ARCH_ESP32)
+      esp32SerialBufPos = esp32SerialBufLen = 0;  // Clear bulk buffer
+#endif
       state = WAITING;
 
       // Signal ready for new stream
