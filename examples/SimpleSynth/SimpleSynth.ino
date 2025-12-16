@@ -27,14 +27,25 @@
 #include <synth/PSGFrequency.h>
 #include <synth/DefaultPatches.h>
 
-// Pin configuration - adjust for your wiring
-#define PIN_WR_P  2   // PSG write strobe
-#define PIN_WR_Y  3   // YM2612 write strobe
-#define PIN_IC_Y  4   // YM2612 reset
-#define PIN_A0_Y  5   // YM2612 A0
-#define PIN_A1_Y  6   // YM2612 A1
-#define PIN_SCK   13  // Shift register clock (hardware SPI)
-#define PIN_SDI   11  // Shift register data (hardware SPI MOSI)
+// Pin configuration - platform specific
+#ifdef ARDUINO_ARCH_ESP32
+  const uint8_t PIN_WR_P = 16;  // WR_P - SN76489 (PSG) write strobe
+  const uint8_t PIN_WR_Y = 17;  // WR_Y - YM2612 write strobe
+  const uint8_t PIN_IC_Y = 25;  // IC_Y - YM2612 reset
+  const uint8_t PIN_A0_Y = 26;  // A0_Y - YM2612 address bit 0
+  const uint8_t PIN_A1_Y = 27;  // A1_Y - YM2612 address bit 1 (port select)
+  const uint8_t PIN_SCK  = 18;  // SCK  - Hardware SPI (fixed on ESP32)
+  const uint8_t PIN_SDI  = 23;  // SDI  - Hardware SPI (fixed on ESP32)
+#else
+  // Teensy / Arduino defaults
+  const uint8_t PIN_WR_P = 2;   // WR_P - SN76489 (PSG) write strobe
+  const uint8_t PIN_WR_Y = 3;   // WR_Y - YM2612 write strobe
+  const uint8_t PIN_IC_Y = 4;   // IC_Y - YM2612 reset
+  const uint8_t PIN_A0_Y = 5;   // A0_Y - YM2612 address bit 0
+  const uint8_t PIN_A1_Y = 6;   // A1_Y - YM2612 address bit 1 (port select)
+  const uint8_t PIN_SCK  = 13;  // SCK  - Shift register clock (ignored w/ HW SPI)
+  const uint8_t PIN_SDI  = 11;  // SDI  - Shift register data (ignored w/ HW SPI)
+#endif
 
 GenesisBoard board(PIN_WR_P, PIN_WR_Y, PIN_IC_Y, PIN_A0_Y, PIN_A1_Y, PIN_SCK, PIN_SDI);
 
