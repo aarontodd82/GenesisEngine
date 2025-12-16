@@ -77,13 +77,8 @@ PSGFrequency::playNote(board, 0, 60, 2);    // Channel 0, note 60, volume 2
 
 ## Building On This
 
-For a full synthesizer with MIDI support, see the **MIDISynth** example. SimpleSynth is intentionally minimal to demonstrate the core synthesis APIs.
+For a full synthesizer with MIDI support, see the **MIDISynth** example.
 
-The synthesis utilities are also useful for:
-- Sound effects in games
-- Custom instruments
-- Algorithmic composition
-- Learning FM synthesis
 
 ## Pin Configuration
 
