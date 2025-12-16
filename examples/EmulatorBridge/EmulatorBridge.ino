@@ -95,18 +95,28 @@
 #endif
 
 // =============================================================================
-// Pin Configuration
+// Pin Configuration (platform specific)
 // =============================================================================
 
-const uint8_t PIN_WR_P = 2;
-const uint8_t PIN_WR_Y = 3;
-const uint8_t PIN_IC_Y = 4;
-const uint8_t PIN_A0_Y = 5;
-const uint8_t PIN_A1_Y = 6;
-
-// Software SPI pins (only used if hardware SPI disabled)
-const uint8_t PIN_SCK  = 7;
-const uint8_t PIN_SDI  = 8;
+#ifdef ARDUINO_ARCH_ESP32
+  const uint8_t PIN_WR_P = 16;  // WR_P - SN76489 (PSG) write strobe
+  const uint8_t PIN_WR_Y = 17;  // WR_Y - YM2612 write strobe
+  const uint8_t PIN_IC_Y = 25;  // IC_Y - YM2612 reset
+  const uint8_t PIN_A0_Y = 26;  // A0_Y - YM2612 address bit 0
+  const uint8_t PIN_A1_Y = 27;  // A1_Y - YM2612 address bit 1 (port select)
+  const uint8_t PIN_SCK  = 18;  // SCK  - Hardware SPI (fixed on ESP32)
+  const uint8_t PIN_SDI  = 23;  // SDI  - Hardware SPI (fixed on ESP32)
+#else
+  // Teensy / Arduino defaults
+  const uint8_t PIN_WR_P = 2;   // WR_P - SN76489 (PSG) write strobe
+  const uint8_t PIN_WR_Y = 3;   // WR_Y - YM2612 write strobe
+  const uint8_t PIN_IC_Y = 4;   // IC_Y - YM2612 reset
+  const uint8_t PIN_A0_Y = 5;   // A0_Y - YM2612 address bit 0
+  const uint8_t PIN_A1_Y = 6;   // A1_Y - YM2612 address bit 1 (port select)
+  // Software SPI pins (only used if hardware SPI disabled)
+  const uint8_t PIN_SCK  = 7;   // SCK  - Shift register clock
+  const uint8_t PIN_SDI  = 8;   // SDI  - Shift register data
+#endif
 
 // =============================================================================
 // Ring Buffer - large buffer absorbs timing variations

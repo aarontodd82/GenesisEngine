@@ -55,6 +55,10 @@ uint8_t currentPatchNum = 0;
 uint8_t currentFMNote = 0;
 bool fmNoteOn = false;
 
+// Serial input buffer
+char inputBuffer[32];
+uint8_t inputPos = 0;
+
 void setup() {
     Serial.begin(115200);
     while (!Serial && millis() < 3000) {
@@ -71,63 +75,83 @@ void setup() {
     Serial.println(F("SimpleSynth - GenesisEngine Direct Control Demo"));
     Serial.println(F("Commands: n<note> s p<num> t<note> q ?"));
     Serial.println(F("Ready!"));
+    Serial.print(F("> "));
 }
 
 void loop() {
-    if (Serial.available()) {
-        char cmd = Serial.read();
+    while (Serial.available()) {
+        char c = Serial.read();
 
-        switch (cmd) {
-            case 'n': {
-                // Play FM note
-                int note = Serial.parseInt();
-                if (note >= 0 && note <= 127) {
-                    playFMNote(note);
-                }
-                break;
+        // Handle line ending - process command
+        if (c == '\n' || c == '\r') {
+            Serial.println();  // Echo newline
+            if (inputPos > 0) {
+                inputBuffer[inputPos] = '\0';
+                processCommand(inputBuffer);
+                inputPos = 0;
             }
-
-            case 's':
-                // Stop FM note
-                stopFMNote();
-                break;
-
-            case 'p': {
-                // Change patch
-                int patch = Serial.parseInt();
-                if (patch >= 0 && patch < DEFAULT_FM_PATCH_COUNT) {
-                    loadPatch(patch);
-                }
-                break;
-            }
-
-            case 't': {
-                // Play PSG tone
-                int note = Serial.parseInt();
-                if (note >= 0 && note <= 127) {
-                    playPSGNote(note);
-                }
-                break;
-            }
-
-            case 'q':
-                // Silence all
-                silenceAll();
-                break;
-
-            case '?':
-                printHelp();
-                break;
-
-            case '\n':
-            case '\r':
-                // Ignore newlines
-                break;
-
-            default:
-                // Unknown command
-                break;
+            Serial.print(F("> "));  // Prompt for next command
         }
+        // Handle backspace
+        else if (c == '\b' || c == 127) {
+            if (inputPos > 0) {
+                inputPos--;
+                Serial.print(F("\b \b"));  // Erase character on screen
+            }
+        }
+        // Add to buffer if room
+        else if (inputPos < sizeof(inputBuffer) - 1) {
+            inputBuffer[inputPos++] = c;
+            Serial.print(c);  // Echo character
+        }
+    }
+}
+
+void processCommand(const char* cmd) {
+    char command = cmd[0];
+    const char* arg = &cmd[1];
+
+    switch (command) {
+        case 'n': {
+            int note = atoi(arg);
+            if (note >= 0 && note <= 127) {
+                playFMNote(note);
+            }
+            break;
+        }
+
+        case 's':
+            stopFMNote();
+            break;
+
+        case 'p': {
+            int patch = atoi(arg);
+            if (patch >= 0 && patch < DEFAULT_FM_PATCH_COUNT) {
+                loadPatch(patch);
+            }
+            break;
+        }
+
+        case 't': {
+            int note = atoi(arg);
+            if (note >= 0 && note <= 127) {
+                playPSGNote(note);
+            }
+            break;
+        }
+
+        case 'q':
+            silenceAll();
+            break;
+
+        case '?':
+            printHelp();
+            break;
+
+        default:
+            Serial.print(F("Unknown command: "));
+            Serial.println(cmd);
+            break;
     }
 }
 

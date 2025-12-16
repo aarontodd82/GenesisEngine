@@ -87,20 +87,31 @@
 #endif
 
 // =============================================================================
-// Pin Configuration - Genesis Engine Board
+// Pin Configuration - Genesis Engine Board (platform specific)
 // =============================================================================
 // IMPORTANT FOR ARDUINO UNO/MEGA:
 // The shift register MUST use pins 7 and 8 (software bit-bang) because the
 // SD card uses the hardware SPI pins. See wiring diagram above!
 // =============================================================================
 
-const uint8_t PIN_WR_P = 2;   // WR_P - SN76489 (PSG) write strobe
-const uint8_t PIN_WR_Y = 3;   // WR_Y - YM2612 write strobe
-const uint8_t PIN_IC_Y = 4;   // IC_Y - YM2612 reset
-const uint8_t PIN_A0_Y = 5;   // A0_Y - YM2612 address bit 0
-const uint8_t PIN_A1_Y = 6;   // A1_Y - YM2612 address bit 1 (port select)
-const uint8_t PIN_SCK  = 7;   // Shift register clock - DIRECTLY INTO PIN 7 FOR ARDUINO!
-const uint8_t PIN_SDI  = 8;   // Shift register data  - DIRECTLY INTO PIN 8 FOR ARDUINO!
+#ifdef ARDUINO_ARCH_ESP32
+  const uint8_t PIN_WR_P = 16;  // WR_P - SN76489 (PSG) write strobe
+  const uint8_t PIN_WR_Y = 17;  // WR_Y - YM2612 write strobe
+  const uint8_t PIN_IC_Y = 25;  // IC_Y - YM2612 reset
+  const uint8_t PIN_A0_Y = 26;  // A0_Y - YM2612 address bit 0
+  const uint8_t PIN_A1_Y = 27;  // A1_Y - YM2612 address bit 1 (port select)
+  const uint8_t PIN_SCK  = 18;  // SCK  - Hardware SPI (fixed on ESP32)
+  const uint8_t PIN_SDI  = 23;  // SDI  - Hardware SPI (fixed on ESP32)
+#else
+  // Teensy / Arduino defaults
+  const uint8_t PIN_WR_P = 2;   // WR_P - SN76489 (PSG) write strobe
+  const uint8_t PIN_WR_Y = 3;   // WR_Y - YM2612 write strobe
+  const uint8_t PIN_IC_Y = 4;   // IC_Y - YM2612 reset
+  const uint8_t PIN_A0_Y = 5;   // A0_Y - YM2612 address bit 0
+  const uint8_t PIN_A1_Y = 6;   // A1_Y - YM2612 address bit 1 (port select)
+  const uint8_t PIN_SCK  = 7;   // Shift register clock - PIN 7 FOR ARDUINO (software SPI)
+  const uint8_t PIN_SDI  = 8;   // Shift register data  - PIN 8 FOR ARDUINO (software SPI)
+#endif
 
 // SD Card CS pin (platform-specific default from feature_config.h)
 const uint8_t PIN_SD_CS = GENESIS_ENGINE_SD_CS_PIN;
