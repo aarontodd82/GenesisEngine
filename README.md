@@ -8,14 +8,13 @@ Play VGM music files, stream audio directly from an emulator, or use it as a sta
 
 ## The Board
 
-The Genesis Engine board design is based on [Stefan Nikolaj's DOS Synth], with several upgrades:
+Schematics, KiCad, & Gerbers are in the hardware folder, but if you just want to grab one:
+[https://www.tindie.com/products/40905/](https://www.tindie.com/products/40905/)
 
 - **Stereo output** — Full left/right channel separation
 - **Accurate clocks** — Crystal oscillators tuned for correct pitch
 - **FM and PSG in tune** — Both chips share a proper clock relationship
 - **Upgraded Op-amp** — Designed for low noise
-
-The `hardware/` directory contains KiCad schematics and PCB files.
 
 ## Features
 
