@@ -1,0 +1,11 @@
+# Visual Streaming dependencies
+# Install with: pip install -r requirements.txt
+
+# GUI framework - Dear ImGui + ImPlot + more
+imgui-bundle>=1.5.0
+
+# Array operations for waveform generation
+numpy>=1.24.0
+
+# Serial communication (same as stream_vgm.py)
+pyserial>=3.5
