@@ -25,6 +25,11 @@ class SN76489:
     # Number of channels
     NUM_CHANNELS = 4  # 3 tone + 1 noise
 
+    # Noise tap bits for LFSR feedback
+    # SN76489 uses a 16-bit LFSR with taps at bits 0 and 3 for white noise
+    NOISE_TAPS_WHITE = 0x0009  # Bits 0 and 3
+    NOISE_TAPS_PERIODIC = 0x0001  # Bit 0 only (periodic noise)
+
     def __init__(self):
         # Tone registers (10-bit frequency dividers)
         self.tone_regs = [0, 0, 0, 0]
@@ -35,18 +40,59 @@ class SN76489:
         # Noise register
         self.noise_reg = 0  # Bits 0-1: shift rate, Bit 2: 0=periodic, 1=white
 
-        # Internal state for waveform generation
-        self.tone_counters = [0.0, 0.0, 0.0]
+        # Phase accumulators for waveform generation (0.0 to 1.0)
+        self.phase = [0.0, 0.0, 0.0]
         self.tone_outputs = [1, 1, 1]  # Current output state (1 or -1)
 
-        # Noise state
-        self.noise_shift = 0x8000  # 16-bit LFSR
+        # Noise state - proper LFSR implementation
+        self.noise_lfsr = 0x8000  # 16-bit LFSR, start with bit 15 set
         self.noise_counter = 0.0
-        self.noise_output = 1
+        self.noise_output = 1  # Current output state (1 or -1)
 
         # Current latch (which register is being addressed)
         self._latch_type = 0  # 0=tone, 1=attenuation
         self._latch_channel = 0
+
+    def _get_noise_shift_rate(self) -> float:
+        """Get the noise shift rate in Hz based on noise register."""
+        shift_rate_bits = self.noise_reg & 0x03
+
+        if shift_rate_bits == 0:
+            # N/512 - highest frequency noise
+            return self.CLOCK / 512.0
+        elif shift_rate_bits == 1:
+            # N/1024
+            return self.CLOCK / 1024.0
+        elif shift_rate_bits == 2:
+            # N/2048
+            return self.CLOCK / 2048.0
+        else:
+            # Use channel 2's frequency (shift_rate_bits == 3)
+            if self.tone_regs[2] > 0:
+                return self.CLOCK / (32.0 * self.tone_regs[2])
+            return 0.0
+
+    def _shift_lfsr(self):
+        """Shift the LFSR and return new output bit."""
+        # Determine tap mask based on noise type
+        is_white = (self.noise_reg & 0x04) != 0
+        taps = self.NOISE_TAPS_WHITE if is_white else self.NOISE_TAPS_PERIODIC
+
+        # Calculate feedback bit (XOR of tapped bits, or just bit 0 for periodic)
+        if is_white:
+            # Parity of bits 0 and 3
+            feedback = ((self.noise_lfsr & taps) != 0) and \
+                      (bin(self.noise_lfsr & taps).count('1') & 1)
+            feedback = 1 if (bin(self.noise_lfsr & taps).count('1') & 1) else 0
+        else:
+            # Just bit 0 for periodic noise
+            feedback = self.noise_lfsr & 1
+
+        # Shift right and insert feedback at bit 15
+        self.noise_lfsr = ((self.noise_lfsr >> 1) | (feedback << 15)) & 0xFFFF
+
+        # Output is bit 0
+        self.noise_output = 1 if (self.noise_lfsr & 1) else -1
 
     def write(self, data: int):
         """
@@ -70,8 +116,9 @@ class SN76489:
                 self.attenuation[self._latch_channel] = data & 0x0F
             else:
                 if self._latch_channel == 3:
-                    # Noise register
+                    # Noise register - writing resets the LFSR
                     self.noise_reg = data & 0x07
+                    self.noise_lfsr = 0x8000  # Reset LFSR
                 else:
                     # Tone register (low 4 bits)
                     self.tone_regs[self._latch_channel] = \
@@ -136,60 +183,57 @@ class SN76489:
 
         # Generate tone channels
         for ch in range(3):
-            samples = np.zeros(num_samples, dtype=np.float32)
             volume = self.get_volume(ch)
 
             if volume > 0 and self.tone_regs[ch] > 0:
                 freq = self.get_frequency(ch)
-                # Samples per half-period
-                half_period = self.SAMPLE_RATE / (2.0 * freq) if freq > 0 else 0
+                # Phase increment per sample (in cycles, 0.0 to 1.0 per cycle)
+                phase_inc = freq / self.SAMPLE_RATE
 
-                if half_period > 0:
-                    for i in range(num_samples):
-                        samples[i] = self.tone_outputs[ch] * volume
-                        self.tone_counters[ch] += 1.0
-                        if self.tone_counters[ch] >= half_period:
-                            self.tone_counters[ch] -= half_period
-                            self.tone_outputs[ch] = -self.tone_outputs[ch]
+                # Generate samples with continuous phase
+                samples = np.zeros(num_samples, dtype=np.float32)
+                phase = self.phase[ch]
+
+                for i in range(num_samples):
+                    # Square wave: positive for first half of cycle, negative for second
+                    samples[i] = volume if phase < 0.5 else -volume
+                    phase += phase_inc
+                    if phase >= 1.0:
+                        phase -= 1.0
+
+                # Save phase for next call
+                self.phase[ch] = phase
+            else:
+                samples = np.zeros(num_samples, dtype=np.float32)
 
             outputs.append(samples)
 
-        # Generate noise channel
-        noise_samples = np.zeros(num_samples, dtype=np.float32)
+        # Generate noise channel with proper LFSR
         volume = self.get_volume(3)
-
         if volume > 0:
-            # Noise shift rate
-            shift_rate = self.noise_reg & 0x03
-            is_white = bool(self.noise_reg & 0x04)
+            shift_rate = self._get_noise_shift_rate()
+            if shift_rate > 0:
+                # Phase increment for noise (how fast the LFSR shifts)
+                phase_inc = shift_rate / self.SAMPLE_RATE
 
-            # Calculate noise frequency
-            if shift_rate == 3:
-                # Use channel 2's frequency
-                noise_freq = self.get_frequency(2)
-            else:
-                # Fixed frequencies
-                noise_freq = self.CLOCK / (32.0 * (16 << shift_rate))
+                noise_samples = np.zeros(num_samples, dtype=np.float32)
+                phase = self.noise_counter
 
-            half_period = self.SAMPLE_RATE / (2.0 * noise_freq) if noise_freq > 0 else 0
-
-            if half_period > 0:
                 for i in range(num_samples):
-                    noise_samples[i] = (1 if self.noise_shift & 1 else -1) * volume
-                    self.noise_counter += 1.0
+                    # Output current LFSR state
+                    noise_samples[i] = self.noise_output * volume
+                    phase += phase_inc
+                    # Shift LFSR when phase wraps
+                    while phase >= 1.0:
+                        phase -= 1.0
+                        self._shift_lfsr()
 
-                    if self.noise_counter >= half_period:
-                        self.noise_counter -= half_period
-                        # Shift LFSR
-                        if is_white:
-                            # White noise: XOR bits 0 and 3
-                            feedback = ((self.noise_shift & 1) ^
-                                       ((self.noise_shift >> 3) & 1))
-                        else:
-                            # Periodic noise: just bit 0
-                            feedback = self.noise_shift & 1
-
-                        self.noise_shift = (self.noise_shift >> 1) | (feedback << 15)
+                self.noise_counter = phase
+            else:
+                # No shift rate - output constant
+                noise_samples = np.full(num_samples, self.noise_output * volume, dtype=np.float32)
+        else:
+            noise_samples = np.zeros(num_samples, dtype=np.float32)
 
         outputs.append(noise_samples)
 
@@ -200,9 +244,9 @@ class SN76489:
         self.tone_regs = [0, 0, 0, 0]
         self.attenuation = [15, 15, 15, 15]
         self.noise_reg = 0
-        self.tone_counters = [0.0, 0.0, 0.0]
+        self.phase = [0.0, 0.0, 0.0]
         self.tone_outputs = [1, 1, 1]
-        self.noise_shift = 0x8000
+        self.noise_lfsr = 0x8000  # Reset LFSR
         self.noise_counter = 0.0
         self.noise_output = 1
         self._latch_type = 0

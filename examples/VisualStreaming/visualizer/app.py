@@ -110,9 +110,9 @@ class VisualizerApp:
         # FFT size for autocorrelation-based pitch detection (Furnace uses 4096)
         self.fft_size = 4096
 
-        # Display window size in milliseconds
-        # Smaller = fewer cycles shown = more spread out waveform
-        self.window_size_ms = 6.0
+        # Fixed display window size in samples (Furnace uses user-configurable ms)
+        # ~5.8ms at 44100Hz = 256 samples - small enough to see clear waveforms
+        self.display_samples = 256
 
         # Detected periods for each channel (in samples)
         self.detected_periods = [0] * self.TOTAL_CHANNELS
@@ -122,6 +122,10 @@ class VisualizerApp:
 
         # Smoothed needle positions for each channel (Furnace-style phase-locked display)
         self.needle_pos = [0.0] * self.TOTAL_CHANNELS
+
+        # Total samples received per channel (like Furnace's buf->needle)
+        # This continuously advances and provides frame-to-frame continuity
+        self.total_samples_received = [0] * self.TOTAL_CHANNELS
 
         # Previous periods for smoothing
         self.prev_periods = [0.0] * self.TOTAL_CHANNELS
@@ -135,11 +139,14 @@ class VisualizerApp:
         # Amplitude scaling per channel (for auto-gain)
         self.amplitude_scale = [1.0] * self.TOTAL_CHANNELS
 
-        # Target amplitude for display (normalized)
-        self.target_amplitude = 0.8
+        # Target amplitude for display (normalized) - keep some headroom
+        self.target_amplitude = 0.6
 
         # Amplitude smoothing factor
         self.amplitude_smoothing = 0.95
+
+        # Max amplitude scale (prevent extreme boosting that causes clipping look)
+        self.max_amplitude_scale = 4.0
 
     def update_waveform(self, channel: int, data: np.ndarray):
         """Update waveform data for a channel (thread-safe)."""
@@ -154,78 +161,138 @@ class VisualizerApp:
                     self.valid_samples[channel] + samples,
                     self.WAVEFORM_SAMPLES
                 )
+                # Track total samples received (like Furnace's buf->needle)
+                # This provides frame-to-frame continuity for phase-locking
+                self.total_samples_received[channel] += len(data)
 
-    def _furnace_find_period(self, data: np.ndarray) -> int:
+    def _furnace_process_fft(self, channel_idx: int, data: np.ndarray, display_size: int):
         """
-        Find waveform period using Furnace's exact algorithm:
-        1. FFT of windowed signal
-        2. Inverse FFT of auto-correlation (power spectrum)
-        3. Scan backwards for lowest point, then highest point after it
+        Furnace's exact FFT processing for oscilloscope.
+        Updates detected period, phase, and needle position for the channel.
+
+        Key insight: The needle is based on total_samples_received which continuously
+        advances like Furnace's buf->needle. This provides frame-to-frame continuity.
         """
+        FFT_SIZE = self.fft_size  # 4096
+        BUFFER_SIZE = self.WAVEFORM_SAMPLES  # 8192
+
         n = len(data)
-        if n < 64:
-            return 0
+        if n < FFT_SIZE:
+            return
 
-        # Normalize input
-        max_val = np.abs(data).max()
+        # Check if loud enough
+        max_val = np.abs(data[-FFT_SIZE:]).max()
         if max_val < 0.001:
-            return 0  # Silent
-        normalized = data.astype(np.float64) / max_val
+            return
 
-        # Apply Hann window
-        window = np.hanning(n)
-        windowed = normalized * window
+        # Get the current stream position (like Furnace's buf->needle)
+        stream_pos = self.total_samples_received[channel_idx]
 
-        # FFT -> power spectrum -> inverse FFT = autocorrelation
-        fft_result = np.fft.rfft(windowed)
-        power = np.abs(fft_result) ** 2
-        autocorr = np.fft.irfft(power, n)
+        # Prepare input buffer with Hamming window (Furnace: 0.55 - 0.45*cos)
+        in_buf = np.zeros(FFT_SIZE, dtype=np.float64)
+        for j in range(FFT_SIZE):
+            sample = data[n - FFT_SIZE + j]
+            in_buf[j] = float(sample)
+            # Hamming window
+            in_buf[j] *= 0.55 - 0.45 * np.cos(np.pi * j / (FFT_SIZE >> 1))
 
-        # Furnace scans BACKWARDS from n/4 to find lowest point
+        # FFT
+        fft_out = np.fft.rfft(in_buf)
+
+        # Power spectrum (magnitude squared)
+        power = np.abs(fft_out) ** 2
+
+        # Inverse FFT for autocorrelation
+        corr_buf = np.fft.irfft(power, FFT_SIZE)
+
+        # Find size of period - scan BACKWARDS from FFT_SIZE/4 to find lowest
+        wave_len_cand_l = float('inf')
         wave_len_bottom = 2
-        lowest_val = autocorr[2]
-        for j in range(n // 4, 2, -1):
-            if autocorr[j] < lowest_val:
-                lowest_val = autocorr[j]
+        for j in range(FFT_SIZE >> 2, 2, -1):
+            if corr_buf[j] < wave_len_cand_l:
+                wave_len_cand_l = corr_buf[j]
                 wave_len_bottom = j
 
-        # Then scan backwards from n/2 to wave_len_bottom to find highest
-        wave_len = wave_len_bottom
-        highest_val = autocorr[wave_len_bottom]
-        for j in range(n // 2 - 1, wave_len_bottom, -1):
-            if autocorr[j] > highest_val:
-                highest_val = autocorr[j]
+        # Find highest point scanning backwards from FFT_SIZE/2 to wave_len_bottom
+        wave_len_cand_h = float('-inf')
+        wave_len = FFT_SIZE - 1
+        for j in range((FFT_SIZE >> 1) - 1, wave_len_bottom, -1):
+            if corr_buf[j] > wave_len_cand_h:
+                wave_len_cand_h = corr_buf[j]
                 wave_len = j
 
-        # Validate: need a clear peak
-        if wave_len <= wave_len_bottom or wave_len < 8:
-            return 0
+        # Check if we got a valid period
+        if wave_len >= FFT_SIZE - 32:
+            return  # No valid period found
 
-        return wave_len
+        # Scale waveLen by displaySize (Furnace: waveLen *= displaySize*2.0/FFT_SIZE)
+        wave_len_scaled = wave_len * (display_size * 2.0 / FFT_SIZE)
 
-    def _furnace_find_phase(self, data: np.ndarray, wave_len: int) -> float:
-        """
-        Find phase using Furnace's exact DFT algorithm.
-        Computes DFT at fundamental frequency over exactly one period.
-        """
-        if wave_len < 4 or len(data) < wave_len:
-            return 0.0
+        # Smooth the period
+        prev_period = self.prev_periods[channel_idx]
+        if prev_period > 0:
+            wave_len_scaled = prev_period * 0.9 + wave_len_scaled * 0.1
+        self.prev_periods[channel_idx] = wave_len_scaled
+        self.detected_periods[channel_idx] = int(wave_len_scaled)
 
-        # DFT over one period (Furnace's exact approach)
-        dft_real = 0.0
-        dft_imag = 0.0
+        # DFT of one period to get phase
+        if wave_len_scaled >= 4:
+            dft_real = 0.0
+            dft_imag = 0.0
 
-        # Sample exactly one period from the end of data
-        start_idx = len(data) - wave_len
-        for k in range(wave_len):
-            sample = data[start_idx + k] / 32768.0 if abs(data[start_idx + k]) > 1 else data[start_idx + k]
-            angle = k * (-2.0 * np.pi) / wave_len
-            dft_real += sample * np.cos(angle)
-            dft_imag += sample * np.sin(angle)
+            # Sample one period from near the end of buffer
+            wave_len_int = int(wave_len_scaled)
+            start_pos = n - display_size - wave_len_int
 
-        # Phase from atan2 (Furnace: 0.5 + atan2/(2*pi))
-        phase = 0.5 + (np.arctan2(dft_imag, dft_real) / (2.0 * np.pi))
-        return phase
+            for k in range(wave_len_int):
+                idx = start_pos + k
+                if 0 <= idx < n:
+                    sample = float(data[idx])
+                else:
+                    sample = 0.0
+                angle = k * (-2.0 * np.pi) / wave_len_scaled
+                dft_real += sample * np.cos(angle)
+                dft_imag += sample * np.sin(angle)
+
+            # Calculate phase (Furnace: 0.5 + atan2/(2*pi))
+            phase = 0.5 + (np.arctan2(dft_imag, dft_real) / (2.0 * np.pi))
+            self.detected_phases[channel_idx] = phase
+
+            # Debug: print values for channel 0 every ~1 second
+            if channel_idx == 0 and stream_pos % 44100 < 1000:
+                import sys
+                print(f"CH0: period={wave_len_scaled:.1f}, phase={phase:.3f}, offset={phase * wave_len_scaled:.1f}", flush=True)
+
+            # Calculate needle in STREAM coordinates (like Furnace)
+            # Start with current stream position, back up by display size
+            needle = float(stream_pos) - display_size
+
+            # Apply phase correction (Furnace: needle -= phase * waveLen)
+            needle -= phase * wave_len_scaled
+
+            # The needle position should be smoothed to prevent jumps
+            # But we need to handle the fact that stream_pos keeps increasing
+            current_needle = self.needle_pos[channel_idx]
+
+            if current_needle == 0:
+                # First time - initialize
+                self.needle_pos[channel_idx] = needle
+            else:
+                # Calculate expected needle based on samples received since last update
+                # The needle should advance at the same rate as stream_pos
+                expected_advance = stream_pos - (current_needle + display_size + phase * wave_len_scaled)
+
+                # Only apply phase correction, don't fight the stream advancement
+                target_needle = float(stream_pos) - display_size - phase * wave_len_scaled
+
+                # Smooth only the phase-corrected offset, not the base position
+                phase_offset = target_needle - (stream_pos - display_size)
+                current_offset = current_needle - (stream_pos - display_size - expected_advance)
+
+                # Smooth the offset
+                smoothed_offset = current_offset * self.needle_smoothing + phase_offset * (1 - self.needle_smoothing)
+
+                self.needle_pos[channel_idx] = (stream_pos - display_size) + smoothed_offset
 
     def _get_display_position(self, channel_idx: int, data: np.ndarray,
                                valid_samples: int, display_samples: int) -> int:
@@ -233,71 +300,38 @@ class VisualizerApp:
         Get display position using Furnace-style phase-locked display.
         """
         buffer_len = len(data)
-        valid_start = buffer_len - valid_samples
+        BUFFER_SIZE = self.WAVEFORM_SAMPLES
 
-        if valid_samples < display_samples + 64:
+        if valid_samples < display_samples + self.fft_size:
             return -1
 
-        # Use more data for analysis (Furnace uses 4096 samples for FFT)
-        analysis_len = min(self.fft_size, valid_samples)
-        analysis_data = data[buffer_len - analysis_len:]
+        # Run Furnace's FFT processing
+        self._furnace_process_fft(channel_idx, data, display_samples)
 
-        # Find period using Furnace algorithm
-        wave_len = self._furnace_find_period(analysis_data)
+        # Get the needle position (in stream coordinates)
+        stream_needle = self.needle_pos[channel_idx]
+        stream_pos = self.total_samples_received[channel_idx]
 
-        # Smooth the period
-        if wave_len > 0:
-            prev = self.prev_periods[channel_idx]
-            if prev > 0:
-                # Furnace-style smoothing
-                smoothed = prev * self.period_smoothing + wave_len * (1 - self.period_smoothing)
-            else:
-                smoothed = float(wave_len)
-            self.prev_periods[channel_idx] = smoothed
-            self.detected_periods[channel_idx] = int(smoothed)
-            wave_len = int(smoothed)
-        else:
-            wave_len = int(self.prev_periods[channel_idx]) if self.prev_periods[channel_idx] > 0 else 0
+        if stream_needle <= 0:
+            # Fallback - just show recent samples
+            return buffer_len - display_samples
 
-        # Calculate display position
-        if wave_len >= 4:
-            # Find phase
-            phase = self._furnace_find_phase(analysis_data, wave_len)
-            self.detected_phases[channel_idx] = phase
+        # Convert stream position to buffer position
+        # The buffer holds the last BUFFER_SIZE samples
+        # stream_pos points to "just after the last sample in buffer"
+        # stream_needle is where we want to start reading
 
-            # Phase offset adjusts where we start reading
-            phase_off = phase * wave_len
+        # How far back from current position?
+        samples_back = stream_pos - stream_needle
 
-            # Base position: end of buffer minus display size minus one period
-            base_pos = float(buffer_len - display_samples - wave_len)
-
-            # Target position adjusted by phase (Furnace: needle -= phase * waveLen)
-            target_pos = base_pos - phase_off
-
-            # Smooth the needle position (critical for stable display)
-            current = self.needle_pos[channel_idx]
-            if current == 0:
-                new_pos = target_pos
-            else:
-                # Check if we need to jump (phase wrapped around)
-                diff = target_pos - current
-                if abs(diff) > wave_len * 0.7:
-                    # Phase wrapped - jump to new position
-                    new_pos = target_pos
-                else:
-                    # Smooth interpolation
-                    new_pos = current * self.needle_smoothing + target_pos * (1 - self.needle_smoothing)
-
-            self.needle_pos[channel_idx] = new_pos
-            trigger_idx = int(new_pos)
-        else:
-            # No period - just show recent samples
-            trigger_idx = buffer_len - display_samples - 32
+        # Convert to buffer index (buffer end is at buffer_len)
+        buffer_idx = buffer_len - int(samples_back)
 
         # Clamp to valid range
-        trigger_idx = max(valid_start, min(trigger_idx, buffer_len - display_samples))
+        valid_start = buffer_len - valid_samples
+        buffer_idx = max(valid_start, min(buffer_idx, buffer_len - display_samples))
 
-        return trigger_idx
+        return buffer_idx
 
     def set_key_on(self, channel: int, on: bool):
         """Set key-on state for a channel."""
@@ -334,17 +368,15 @@ class VisualizerApp:
             full_data = self.waveforms[channel_idx].copy()
             valid_count = self.valid_samples[channel_idx]
 
-        # Noise channel (9) always uses scrolling mode
-        # Channel 5 (FM6/DAC) now uses triggered mode like other FM channels
+        # Noise channel (9) and DAC channel (5) use scrolling mode
         is_noise = (channel_idx == 9)
+        is_dac = (channel_idx == 5)
 
-        # Fixed display window size (like Furnace) - convert ms to samples
-        # 44100 Hz * window_size_ms / 1000
-        display_samples = int(44100 * self.window_size_ms / 1000)
-        display_samples = max(128, min(1024, display_samples))  # Clamp to reasonable range
+        # Fixed display window (Furnace-style: user-configurable, period only for phase alignment)
+        display_samples = self.display_samples
 
-        # Use triggered display for tonal channels, scrolling for noise
-        if self.triggered_display and not is_noise:
+        # Use triggered display for tonal FM/PSG channels, scrolling for noise/DAC
+        if self.triggered_display and not is_noise and not is_dac:
             # Phase-locked display mode (like Furnace)
             trigger_idx = self._get_display_position(channel_idx, full_data, valid_count, display_samples)
             if trigger_idx >= 0:
@@ -374,13 +406,11 @@ class VisualizerApp:
             new_scale = current_scale * self.amplitude_smoothing + desired_scale * (1 - self.amplitude_smoothing)
 
             # Clamp scale to reasonable range
-            new_scale = max(1.0, min(20.0, new_scale))
+            new_scale = max(1.0, min(self.max_amplitude_scale, new_scale))
             self.amplitude_scale[channel_idx] = new_scale
 
-            # Apply scaling
+            # Apply scaling (no hard clipping - let it show naturally)
             y_data = y_data * new_scale
-            # Clip to prevent overflow
-            y_data = np.clip(y_data, -1.0, 1.0)
 
         # Create x-axis normalized to 0-1 range for consistent display
         x_data = np.linspace(0, 1, len(y_data), dtype=np.float32)
