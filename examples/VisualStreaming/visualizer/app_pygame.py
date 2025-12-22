@@ -408,6 +408,175 @@ class VisualizerApp:
 
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
 
+        # Set up initial projection matrix
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        glOrtho(0, self.width, self.height, 0, -1, 1)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+
+        # Enable blending
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        # Enable line smoothing
+        glEnable(GL_LINE_SMOOTH)
+        glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
+
+        # Track fullscreen state and viewport for letterboxing
+        self.fullscreen = False
+        self.windowed_size = (self.width, self.height)
+        self.screen_width = self.width
+        self.screen_height = self.height
+        # Viewport for letterboxing (x, y, w, h)
+        self.viewport = (0, 0, self.width, self.height)
+
+    def _resize_framebuffers(self, width, height):
+        """Resize framebuffers when window size changes."""
+        self.width = width
+        self.height = height
+
+        # Clear text cache since positions may change
+        for tex_id, _, _ in self.text_cache.values():
+            glDeleteTextures(1, [tex_id])
+        self.text_cache.clear()
+
+        # Resize first framebuffer texture
+        glBindTexture(GL_TEXTURE_2D, self.fb_texture)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, None)
+
+        # Resize second framebuffer texture
+        glBindTexture(GL_TEXTURE_2D, self.fb_texture2)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, None)
+
+        # Update projection matrix
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        glOrtho(0, width, height, 0, -1, 1)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+
+    def _toggle_fullscreen(self):
+        """Toggle between fullscreen and windowed mode."""
+        self.fullscreen = not self.fullscreen
+
+        if self.fullscreen:
+            # Save current window size
+            self.windowed_size = (self.width, self.height)
+
+            # Get window position to determine which monitor we're on
+            try:
+                import ctypes
+                from ctypes import wintypes
+
+                # Make process DPI aware to get real physical pixels
+                try:
+                    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+                except:
+                    try:
+                        ctypes.windll.user32.SetProcessDPIAware()
+                    except:
+                        pass
+
+                hwnd = pygame.display.get_wm_info()['window']
+                # Get monitor that contains the window
+                MONITOR_DEFAULTTONEAREST = 2
+                monitor = ctypes.windll.user32.MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)
+
+                # Get monitor info with physical pixels
+                class MONITORINFOEX(ctypes.Structure):
+                    _fields_ = [("cbSize", wintypes.DWORD),
+                               ("rcMonitor", wintypes.RECT),
+                               ("rcWork", wintypes.RECT),
+                               ("dwFlags", wintypes.DWORD),
+                               ("szDevice", wintypes.WCHAR * 32)]
+
+                mi = MONITORINFOEX()
+                mi.cbSize = ctypes.sizeof(MONITORINFOEX)
+                ctypes.windll.user32.GetMonitorInfoW(monitor, ctypes.byref(mi))
+
+                # Get the actual physical resolution using EnumDisplaySettings
+                class DEVMODE(ctypes.Structure):
+                    _fields_ = [("dmDeviceName", wintypes.WCHAR * 32),
+                               ("dmSpecVersion", wintypes.WORD),
+                               ("dmDriverVersion", wintypes.WORD),
+                               ("dmSize", wintypes.WORD),
+                               ("dmDriverExtra", wintypes.WORD),
+                               ("dmFields", wintypes.DWORD),
+                               ("dmPositionX", wintypes.LONG),
+                               ("dmPositionY", wintypes.LONG),
+                               ("dmDisplayOrientation", wintypes.DWORD),
+                               ("dmDisplayFixedOutput", wintypes.DWORD),
+                               ("dmColor", wintypes.SHORT),
+                               ("dmDuplex", wintypes.SHORT),
+                               ("dmYResolution", wintypes.SHORT),
+                               ("dmTTOption", wintypes.SHORT),
+                               ("dmCollate", wintypes.SHORT),
+                               ("dmFormName", wintypes.WCHAR * 32),
+                               ("dmLogPixels", wintypes.WORD),
+                               ("dmBitsPerPel", wintypes.DWORD),
+                               ("dmPelsWidth", wintypes.DWORD),
+                               ("dmPelsHeight", wintypes.DWORD),
+                               ("dmDisplayFlags", wintypes.DWORD),
+                               ("dmDisplayFrequency", wintypes.DWORD)]
+
+                dm = DEVMODE()
+                dm.dmSize = ctypes.sizeof(DEVMODE)
+                ENUM_CURRENT_SETTINGS = -1
+
+                if ctypes.windll.user32.EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, ctypes.byref(dm)):
+                    native_w = dm.dmPelsWidth
+                    native_h = dm.dmPelsHeight
+                else:
+                    # Fallback to monitor info (may be scaled)
+                    native_w = mi.rcMonitor.right - mi.rcMonitor.left
+                    native_h = mi.rcMonitor.bottom - mi.rcMonitor.top
+
+                print(f"Current monitor physical resolution: {native_w}x{native_h}")
+            except Exception as e:
+                print(f"Could not detect monitor: {e}")
+                # Fallback to first desktop
+                desktop_sizes = pygame.display.get_desktop_sizes()
+                native_w, native_h = desktop_sizes[0] if desktop_sizes else (1920, 1080)
+
+            # Go fullscreen at native resolution
+            self.screen = pygame.display.set_mode((native_w, native_h), DOUBLEBUF | OPENGL | FULLSCREEN)
+
+            self.screen_width = native_w
+            self.screen_height = native_h
+
+            # Calculate 4:3 viewport centered on screen (letterboxing)
+            target_aspect = 4.0 / 3.0
+            screen_aspect = self.screen_width / self.screen_height
+
+            if screen_aspect > target_aspect:
+                # Screen is wider than 4:3 - black bars on sides
+                vp_h = self.screen_height
+                vp_w = int(vp_h * target_aspect)
+            else:
+                # Screen is taller than 4:3 - black bars top/bottom
+                vp_w = self.screen_width
+                vp_h = int(vp_w / target_aspect)
+
+            vp_x = (self.screen_width - vp_w) // 2
+            vp_y = (self.screen_height - vp_h) // 2
+            self.viewport = (vp_x, vp_y, vp_w, vp_h)
+
+            # Resize framebuffers to viewport size (4:3)
+            self._resize_framebuffers(vp_w, vp_h)
+
+            print(f"Viewport: {vp_w}x{vp_h} at ({vp_x},{vp_y})")
+        else:
+            # Restore windowed mode
+            self.screen = pygame.display.set_mode(
+                self.windowed_size,
+                DOUBLEBUF | OPENGL | RESIZABLE
+            )
+            self._resize_framebuffers(*self.windowed_size)
+            self.screen_width = self.windowed_size[0]
+            self.screen_height = self.windowed_size[1]
+            self.viewport = (0, 0, self.width, self.height)
+
         # Enable blending
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
@@ -888,8 +1057,15 @@ class VisualizerApp:
     def _apply_crt_shader(self):
         """Apply CRT post-processing shader (reads from zoomed framebuffer)."""
         glBindFramebuffer(GL_FRAMEBUFFER, 0)
-        glViewport(0, 0, self.width, self.height)
+
+        # Clear full screen with black (for letterbox bars)
+        glViewport(0, 0, self.screen_width, self.screen_height)
+        glClearColor(0, 0, 0, 1)
         glClear(GL_COLOR_BUFFER_BIT)
+
+        # Set viewport for output (letterboxed in fullscreen, full window otherwise)
+        vp_x, vp_y, vp_w, vp_h = self.viewport
+        glViewport(vp_x, vp_y, vp_w, vp_h)
 
         if self.crt_shader is None:
             # Fallback: just copy framebuffer to screen without shader
@@ -907,7 +1083,7 @@ class VisualizerApp:
 
         glUseProgram(self.crt_shader)
 
-        # Set uniforms
+        # Set uniforms - use internal render size for shader effects
         glUniform1f(glGetUniformLocation(self.crt_shader, "time"), pygame.time.get_ticks() / 1000.0)
         glUniform2f(glGetUniformLocation(self.crt_shader, "resolution"), float(self.width), float(self.height))
 
@@ -916,7 +1092,7 @@ class VisualizerApp:
         glBindTexture(GL_TEXTURE_2D, self.fb_texture2)
         glUniform1i(glGetUniformLocation(self.crt_shader, "screenTexture"), 0)
 
-        # Draw fullscreen quad
+        # Draw fullscreen quad (viewport handles letterboxing)
         glBegin(GL_QUADS)
         glTexCoord2f(0, 0); glVertex2f(-1, -1)
         glTexCoord2f(1, 0); glVertex2f(1, -1)
@@ -938,7 +1114,7 @@ class VisualizerApp:
         pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
         pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 0)
 
-        self.screen = pygame.display.set_mode((width, height), DOUBLEBUF | OPENGL)
+        self.screen = pygame.display.set_mode((width, height), DOUBLEBUF | OPENGL | RESIZABLE)
 
         self._init_gl()
 
@@ -949,9 +1125,25 @@ class VisualizerApp:
             for event in pygame.event.get():
                 if event.type == QUIT:
                     self.running = False
+                elif event.type == VIDEORESIZE:
+                    # Handle window resize
+                    if not self.fullscreen:
+                        self.screen = pygame.display.set_mode(
+                            (event.w, event.h),
+                            DOUBLEBUF | OPENGL | RESIZABLE
+                        )
+                        self._resize_framebuffers(event.w, event.h)
+                        self.screen_width = event.w
+                        self.screen_height = event.h
+                        self.viewport = (0, 0, event.w, event.h)
                 elif event.type == KEYDOWN:
                     if event.key == K_ESCAPE:
-                        self.running = False
+                        if self.fullscreen:
+                            self._toggle_fullscreen()  # Exit fullscreen first
+                        else:
+                            self.running = False
+                    elif event.key == K_F11:
+                        self._toggle_fullscreen()
 
             # Pass 1: Render scene to framebuffer
             glBindFramebuffer(GL_FRAMEBUFFER, self.framebuffer)
