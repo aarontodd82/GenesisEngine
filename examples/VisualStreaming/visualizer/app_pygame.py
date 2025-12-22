@@ -908,8 +908,12 @@ class VisualizerApp:
         fm_height_per_channel = (available_height * 0.75) / fm_rows
         psg_height = available_height * 0.25
 
-        fm_width = (available_width - padding) / fm_cols
-        psg_width = (available_width - padding * 3) / psg_cols
+        # Calculate widths so FM and PSG span the same total width
+        # FM: 2 boxes with 1 gap = 2 boxes + 1 padding
+        # PSG: 4 boxes with 3 gaps = 4 boxes + 3 paddings
+        # Both should span: available_width
+        fm_width = (available_width - padding) / fm_cols  # 2 boxes, 1 gap
+        psg_width = (available_width - padding * 3) / psg_cols  # 4 boxes, 3 gaps
 
         # Calculate global amplitude for pulse using envelope follower
         # Use RMS of loudest active channels for better musical response
@@ -958,12 +962,23 @@ class VisualizerApp:
                     cy = status_height + padding + row * fm_height_per_channel
                     self._draw_waveform(cx, cy, fm_width - padding, fm_height_per_channel - padding, ch)
 
-        # Draw PSG channels (1x4)
+        # Draw PSG channels (1x4) - 2 PSG boxes under each FM column
         psg_y = status_height + padding + available_height * 0.75
+        x_start = keyboard_width + padding * 2
+        fm_draw_width = fm_width - padding  # Actual drawn width of FM box
+
+        # Each FM column fits 2 PSG boxes with 1 gap between them
+        psg_box_width = (fm_draw_width - padding) / 2
+
         for i in range(psg_cols):
             ch = self.FM_CHANNELS + i
-            cx = keyboard_width + padding * 2 + i * psg_width + i * padding
-            self._draw_waveform(cx, psg_y, psg_width - padding, psg_height - padding, ch)
+            if i < 2:
+                # Left column (under FM left)
+                cx = x_start + i * (psg_box_width + padding)
+            else:
+                # Right column (under FM right) - starts at fm_width
+                cx = x_start + fm_width + (i - 2) * (psg_box_width + padding)
+            self._draw_waveform(cx, psg_y, psg_box_width, psg_height - padding, ch)
 
         # Draw status bar
         self._draw_status_bar(padding, padding, self.width - padding * 2, status_height - padding)
@@ -974,7 +989,7 @@ class VisualizerApp:
         self._draw_rect(x, y, w, h, self.COLORS['panel'])
 
         # Branding - FM-90s in cyan/blue (Neuropol font) - top left
-        fm90s_color = (0.2, 0.8, 1.0, 1.0)  # Cyan blue
+        fm90s_color = (0.0, 0.24, 0.67, 1.0)  # Deep Sega blue
         self._draw_text_glowing("FM-90s", x + 10, y + 10, fm90s_color, font=self.font_fm90s, glow_strength=0.8)
 
         # Genesis Engine in Sega red (NiseGenesis font) - centered
