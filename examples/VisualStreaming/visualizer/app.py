@@ -150,6 +150,10 @@ class VisualizerApp:
         # Keyboard indicator glow intensity per channel (for smooth on/off transitions)
         self.indicator_glow = [0.0] * self.TOTAL_CHANNELS
 
+        # Global amplitude for pulse effect
+        self.global_amplitude = 0.0
+        self.pulse_intensity = 0.0
+
         # Pitch tracking for keyboard display (continuous pitch value, 0 = no note)
         # Stored as fractional MIDI note (e.g., 60.5 = between C4 and C#4)
         # FM channels 0-5, PSG channels 6-8 (noise channel 9 doesn't have pitch)
@@ -482,14 +486,14 @@ class VisualizerApp:
                     top_color, top_color  # bottom-right, bottom-left
                 )
 
-            # Pure white center line
-            center_color = ImVec4(1.0, 1.0, 1.0, 0.3)
-            implot.push_style_color(implot.Col_.line, center_color)
-            implot.push_style_var(implot.StyleVar_.line_weight, 1.0)
-            implot.plot_line(f"{label}_center", np.array([0.0, 1.0], dtype=np.float32),
-                            np.array([0.0, 0.0], dtype=np.float32))
-            implot.pop_style_var()
-            implot.pop_style_color()
+            # Pure white center line - draw directly for guaranteed color
+            center_y = plot_pos.y + plot_size.y / 2
+            white_color = imgui.get_color_u32(ImVec4(1.0, 1.0, 1.0, 1.0))
+            draw_list.add_line(
+                imgui.ImVec2(plot_pos.x, center_y),
+                imgui.ImVec2(plot_pos.x + plot_size.x, center_y),
+                white_color, 1.0
+            )
 
             # Draw main waveform - clean thin line
             implot.push_style_color(implot.Col_.line, color)
@@ -635,26 +639,17 @@ class VisualizerApp:
                 new_glow = current_glow + (target_glow - current_glow) * 0.08
             self.indicator_glow[ch] = new_glow
 
-            # Draw glow even when fading out (as long as there's some glow left)
+            # Draw subtle glow when fading out
             if new_glow > 0.01 and pitch > 0 and self.keyboard_low_note <= pitch <= self.keyboard_high_note:
                 indicator_y = midi_to_y(pitch)
                 color = self.channel_colors[ch]
 
-                # Outer glow (larger, more visible)
-                outer_glow_alpha = 0.35 * new_glow
-                outer_glow_color = imgui.get_color_u32(ImVec4(color.x, color.y, color.z, outer_glow_alpha))
+                # Subtle glow only (reduced from before)
+                glow_alpha = 0.25 * new_glow
+                glow_color = imgui.get_color_u32(ImVec4(color.x, color.y, color.z, glow_alpha))
                 draw_list.add_rect_filled(
-                    imgui.ImVec2(x, indicator_y - 10),
-                    imgui.ImVec2(x + width, indicator_y + 10),
-                    outer_glow_color
-                )
-
-                # Inner glow trail (brighter)
-                inner_glow_alpha = 0.6 * new_glow
-                glow_color = imgui.get_color_u32(ImVec4(color.x, color.y, color.z, inner_glow_alpha))
-                draw_list.add_rect_filled(
-                    imgui.ImVec2(x, indicator_y - 4),
-                    imgui.ImVec2(x + width, indicator_y + 4),
+                    imgui.ImVec2(x, indicator_y - 5),
+                    imgui.ImVec2(x + width + 8, indicator_y + 5),
                     glow_color
                 )
 
@@ -671,17 +666,64 @@ class VisualizerApp:
                     line_color, 2.0
                 )
 
-                # Draw bigger circle at the indicator
+                # Draw circle hanging off the edge of the keyboard
                 draw_list.add_circle_filled(
-                    imgui.ImVec2(x + width - 6, indicator_y),
-                    6.0, line_color
+                    imgui.ImVec2(x + width + 4, indicator_y),
+                    5.0, line_color
                 )
+
+    def _draw_scanlines(self, window_size):
+        """Draw CRT scanline, vertical stripe, and noise effect."""
+        import random
+        draw_list = imgui.get_foreground_draw_list()
+
+        # Horizontal scanlines
+        scanline_spacing = 3
+        scanline_alpha = 0.1
+        scanline_color = imgui.get_color_u32(ImVec4(0.0, 0.0, 0.0, scanline_alpha))
+
+        y = 0
+        while y < window_size.y:
+            draw_list.add_line(
+                imgui.ImVec2(0, y),
+                imgui.ImVec2(window_size.x, y),
+                scanline_color, 1.0
+            )
+            y += scanline_spacing
+
+        # Subtle vertical stripes
+        vstripe_spacing = 4
+        vstripe_alpha = 0.04
+        vstripe_color = imgui.get_color_u32(ImVec4(0.0, 0.0, 0.0, vstripe_alpha))
+
+        x = 0
+        while x < window_size.x:
+            draw_list.add_line(
+                imgui.ImVec2(x, 0),
+                imgui.ImVec2(x, window_size.y),
+                vstripe_color, 1.0
+            )
+            x += vstripe_spacing
+
 
     def gui(self):
         """Main GUI rendering function - called every frame."""
         # Get window size
         viewport = imgui.get_main_viewport()
         window_size = viewport.size
+
+        # Calculate global amplitude from all channels
+        total_amp = 0.0
+        with self._lock:
+            for ch in range(self.TOTAL_CHANNELS):
+                if self.valid_samples[ch] > 100:
+                    chunk = self.waveforms[ch][-256:]
+                    total_amp += np.abs(chunk).mean()
+        avg_amp = total_amp / self.TOTAL_CHANNELS
+
+        # Smooth the amplitude for pulse effect
+        target_pulse = min(1.0, avg_amp * 3.0)
+        self.pulse_intensity += (target_pulse - self.pulse_intensity) * 0.08  # slower smoothing
 
         # Calculate layout
         padding = 10
@@ -761,25 +803,33 @@ class VisualizerApp:
                 psg_height - padding
             )
 
+        # CRT scanline overlay effect
+        self._draw_scanlines(window_size)
+
         imgui.end()
 
     def _draw_status_bar(self, width: float):
-        """Draw the status bar with playback info."""
-        # File info
-        if self.current_file:
-            imgui.text(f"Playing: {self.current_file}")
-        else:
-            imgui.text_colored(self.COLORS['text_dim'], "No file loaded")
+        """Draw the status bar with playback info and branding."""
+        # Branding - FM-90s in hot pink, Genesis Engine in cyan
+        imgui.text_colored(ImVec4(1.0, 0.1, 0.5, 1.0), "FM-90s")
+        imgui.same_line()
+        imgui.text_colored(ImVec4(0.5, 0.5, 0.5, 1.0), " / ")
+        imgui.same_line()
+        imgui.text_colored(ImVec4(0.0, 0.9, 1.0, 1.0), "Genesis Engine")
 
-        # Progress bar
+        # File info on same line, pushed right
+        imgui.same_line(width - 350)
+        if self.current_file:
+            imgui.text(f"{self.current_file}")
+        else:
+            imgui.text_colored(self.COLORS['text_dim'], "No file")
+
+        # Time on far right
         if self.total_duration > 0:
-            imgui.same_line(width - 200)
+            imgui.same_line(width - 100)
             elapsed_str = self._format_time(self.elapsed_time)
             total_str = self._format_time(self.total_duration)
             imgui.text(f"{elapsed_str} / {total_str}")
-
-        # Status message
-        imgui.text_colored(self.COLORS['text_dim'], self.status_message)
 
     def run(self, title: str = "Genesis Engine Visualizer", width: int = 1280, height: int = 720):
         """Run the visualizer application."""
