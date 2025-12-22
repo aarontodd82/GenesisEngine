@@ -14,7 +14,7 @@ from OpenGL.GL import *
 from OpenGL.GL import shaders
 
 
-# Zoom/Pulse shader - applied BEFORE CRT effects so scanlines stay fixed
+# Pass-through shader (zoom effect removed)
 ZOOM_FRAGMENT_SHADER = """
 #version 130
 
@@ -24,20 +24,7 @@ uniform sampler2D screenTexture;
 uniform float pulseIntensity;
 
 void main() {
-    vec2 uv = TexCoord;
-    vec2 center = vec2(0.5, 0.5);
-
-    // Pulse zoom effect - zoom the content
-    float zoom = 1.0 - pulseIntensity * 0.02;
-    uv = center + (uv - center) * zoom;
-
-    // Check bounds
-    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
-        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
-        return;
-    }
-
-    gl_FragColor = texture2D(screenTexture, uv);
+    gl_FragColor = texture2D(screenTexture, TexCoord);
 }
 """
 
@@ -223,8 +210,10 @@ class VisualizerApp:
         self.keyboard_low_note = 21
         self.keyboard_high_note = 108
 
-        # Pulse effect
+        # Pulse effect - envelope follower with fast attack, slow decay
         self.pulse_intensity = 0.0
+        self.pulse_attack = 0.4   # Fast attack - respond quickly to loud
+        self.pulse_decay = 0.03   # Slow decay - smooth fade out
 
         # OpenGL objects (initialized in run())
         self.screen = None
@@ -348,11 +337,29 @@ class VisualizerApp:
 
     def _init_gl(self):
         """Initialize OpenGL resources."""
-        # Initialize font
+        # Initialize fonts
         pygame.font.init()
         self.font = pygame.font.SysFont('consolas', 14)
         self.font_small = pygame.font.SysFont('consolas', 12)
-        self.font_brand = pygame.font.SysFont('consolas', 16, bold=True)
+        # Specific fonts for branding
+        # FM-90s uses Neuropol, Genesis Engine uses NiseGenesis
+        try:
+            self.font_fm90s = pygame.font.SysFont('Neuropol', 26)
+            print("Using Neuropol for FM-90s")
+        except:
+            self.font_fm90s = pygame.font.SysFont('Impact', 26, bold=True)
+            print("Neuropol not found, using Impact")
+
+        try:
+            self.font_genesis = pygame.font.SysFont('NiseGenesis', 24)
+            print("Using NiseGenesis for Genesis Engine")
+        except:
+            self.font_genesis = pygame.font.SysFont('Impact', 24, bold=True)
+            print("NiseGenesis not found, using Impact")
+
+        # Fallback brand font
+        self.font_brand = pygame.font.SysFont('Impact', 24, bold=True)
+
         self.text_cache = {}  # Cache rendered text textures
 
         # Compile zoom shader (applied before CRT effects)
@@ -476,6 +483,29 @@ class VisualizerApp:
         glEnd()
         glDisable(GL_TEXTURE_2D)
 
+    def _draw_text_glowing(self, text, x, y, color, glow_color=None, font=None, glow_strength=1.0):
+        """Draw text with a subtle neon glow effect."""
+        if glow_color is None:
+            glow_color = color
+
+        # Use additive blending for glow
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE)
+
+        # Draw subtle glow layers
+        for offset in [3, 2]:
+            glow_alpha = 0.06 * glow_strength * (4 - offset) / 2
+            gc = (glow_color[0], glow_color[1], glow_color[2], glow_alpha)
+            for dx in [-offset, 0, offset]:
+                for dy in [-offset, 0, offset]:
+                    if dx != 0 or dy != 0:
+                        self._draw_text(text, x + dx, y + dy, gc, font)
+
+        # Restore normal blending
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        # Draw main text on top
+        self._draw_text(text, x, y, color, font)
+
     def _draw_waveform(self, x, y, w, h, channel_idx):
         """Draw a single channel's waveform."""
         color = self.channel_colors[channel_idx]
@@ -541,8 +571,9 @@ class VisualizerApp:
         glScissor(int(x), int(self.height - y - h), int(w), int(h))
 
         # Draw glow (gradient effect simulated with rectangles)
-        if is_active and max_amp > 0.02:
-            target_intensity = min(1.0, max_amp * 1.5)
+        if is_active and max_amp > 0.005:
+            # Use sqrt for perceptually linear response - small signals still visible
+            target_intensity = min(1.0, np.sqrt(max_amp) * 1.2)
         else:
             target_intensity = 0.0
 
@@ -711,17 +742,27 @@ class VisualizerApp:
         fm_width = (available_width - padding) / fm_cols
         psg_width = (available_width - padding * 3) / psg_cols
 
-        # Calculate global amplitude for pulse
-        total_amp = 0.0
+        # Calculate global amplitude for pulse using envelope follower
+        # Use RMS of loudest active channels for better musical response
+        max_rms = 0.0
         with self._lock:
             for ch in range(self.TOTAL_CHANNELS):
-                if self.valid_samples[ch] > 100:
-                    chunk = self.waveforms[ch][-256:]
-                    total_amp += np.abs(chunk).mean()
-        avg_amp = total_amp / self.TOTAL_CHANNELS
+                if self.valid_samples[ch] > 100 and self.key_on[ch]:
+                    chunk = self.waveforms[ch][-512:]
+                    # RMS is smoother than peak
+                    rms = np.sqrt(np.mean(chunk ** 2))
+                    max_rms = max(max_rms, rms)
 
-        target_pulse = min(1.0, avg_amp * 3.0)
-        self.pulse_intensity += (target_pulse - self.pulse_intensity) * 0.08
+        # Target pulse based on loudest channel
+        target_pulse = min(1.0, max_rms * 4.0)
+
+        # Envelope follower: fast attack, slow decay
+        if target_pulse > self.pulse_intensity:
+            # Attack - respond quickly to loud sounds
+            self.pulse_intensity += (target_pulse - self.pulse_intensity) * self.pulse_attack
+        else:
+            # Decay - fade out smoothly
+            self.pulse_intensity += (target_pulse - self.pulse_intensity) * self.pulse_decay
 
         # Clear with background color
         bg = self.COLORS['background']
@@ -763,16 +804,19 @@ class VisualizerApp:
         # Background
         self._draw_rect(x, y, w, h, self.COLORS['panel'])
 
-        # Branding - FM-90s in hot pink
-        fm90s_color = (1.0, 0.2, 0.6, 1.0)  # Hot pink
-        self._draw_text("FM-90s", x + 10, y + 8, fm90s_color, self.font_brand)
+        # Branding - FM-90s in cyan/blue (Neuropol font) - top left
+        fm90s_color = (0.2, 0.8, 1.0, 1.0)  # Cyan blue
+        self._draw_text_glowing("FM-90s", x + 10, y + 10, fm90s_color, font=self.font_fm90s, glow_strength=0.8)
 
-        # Genesis Engine in cyan
-        engine_color = (0.2, 1.0, 1.0, 1.0)  # Cyan
-        self._draw_text("Genesis Engine", x + 90, y + 8, engine_color, self.font_brand)
+        # Genesis Engine in Sega red (NiseGenesis font) - centered
+        engine_color = (1.0, 0.2, 0.2, 1.0)  # Sega red
+        engine_text = "GENESIS ENGINE"
+        engine_width = self.font_genesis.size(engine_text)[0]
+        engine_x = x + (w - engine_width) // 2
+        self._draw_text_glowing(engine_text, engine_x, y + 12, engine_color, font=self.font_genesis, glow_strength=0.8)
 
-        # Status message
-        self._draw_text(self.status_message, x + 250, y + 10, self.COLORS['white'])
+        # Status message - below FM-90s on left side
+        self._draw_text(self.status_message, x + 10, y + 38, self.COLORS['white'])
 
         # Filename
         if self.current_file:
