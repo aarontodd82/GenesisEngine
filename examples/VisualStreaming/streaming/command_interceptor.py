@@ -14,11 +14,8 @@ at a constant rate regardless of when commands arrive.
 Uses ymfm for YM2612 emulation.
 """
 
-import threading
-import queue
-import time
 import numpy as np
-from typing import Optional, Callable, List, Tuple
+from typing import Optional, Callable
 
 # Import emulators
 import sys
@@ -48,24 +45,27 @@ class CommandInterceptor:
     """
     Intercepts streaming commands and feeds them to emulators.
 
-    NEW DESIGN: Commands are applied immediately (just chip writes).
-    Sample generation runs continuously at real-time rate in a separate thread.
-    This keeps visualization in sync with actual playback.
+    DESIGN: Process commands SYNCHRONOUSLY - no queues!
+    When process_chunk() is called, we immediately:
+    1. Parse all commands in the chunk
+    2. Apply chip writes to emulators
+    3. Generate samples for wait commands
+    4. Send waveforms to visualizer
+
+    This keeps visualization in perfect sync with hardware streaming
+    because both happen in the same call, at the same time.
     """
 
-    # Samples per update (roughly 60fps = 735 samples per frame)
-    SAMPLES_PER_UPDATE = 735
+    # Minimum samples to buffer before sending to visualizer
+    MIN_SAMPLES_FOR_UPDATE = 256
 
-    # Sample rate
-    SAMPLE_RATE = 44100
+    # Maximum samples per visualizer update
+    MAX_SAMPLES_FOR_UPDATE = 2048
 
     def __init__(self):
         # Emulators
         self.ym2612 = YM2612ymfm()
         self.sn76489 = SN76489()
-
-        # Command queue (thread-safe) - for chip writes only
-        self.command_queue: queue.Queue = queue.Queue()
 
         # Waveform callback
         self.on_waveform_update: Optional[Callable[[int, np.ndarray], None]] = None
@@ -73,118 +73,210 @@ class CommandInterceptor:
         # Key-on callback
         self.on_key_change: Optional[Callable[[int, bool], None]] = None
 
+        # Sample buffers for each channel (accumulate before sending)
+        self._fm_buffers = [[] for _ in range(6)]
+        self._psg_buffers = [[] for _ in range(4)]
+
         # Running state
         self._running = False
-        self._command_thread: Optional[threading.Thread] = None
-        self._sample_thread: Optional[threading.Thread] = None
-
-        # Lock for emulator access
-        self._emu_lock = threading.Lock()
 
     def start(self):
-        """Start the interceptor threads."""
-        if self._running:
-            return
-
+        """Initialize the interceptor."""
         self._running = True
-        with self._emu_lock:
-            self.ym2612.reset()
-            self.sn76489.reset()
-
-        # Thread 1: Apply commands (fast, no sample generation)
-        self._command_thread = threading.Thread(target=self._run_commands, daemon=True)
-        self._command_thread.start()
-
-        # Thread 2: Generate samples at real-time rate
-        self._sample_thread = threading.Thread(target=self._run_samples, daemon=True)
-        self._sample_thread.start()
+        self.ym2612.reset()
+        self.sn76489.reset()
+        self._fm_buffers = [[] for _ in range(6)]
+        self._psg_buffers = [[] for _ in range(4)]
 
     def stop(self):
-        """Stop the interceptor threads."""
+        """Stop the interceptor."""
         self._running = False
-        if self._command_thread:
-            self._command_thread.join(timeout=1.0)
-            self._command_thread = None
-        if self._sample_thread:
-            self._sample_thread.join(timeout=1.0)
-            self._sample_thread = None
+        # Flush any remaining samples
+        self._flush_buffers()
 
-    def queue_command(self, cmd: int, args: bytes):
-        """Queue a command for processing."""
-        self.command_queue.put((cmd, args))
-
-    def _run_commands(self):
-        """Process commands as fast as possible - just apply chip writes."""
-        while self._running:
-            try:
-                cmd, args = self.command_queue.get(timeout=0.01)
-                self._apply_command(cmd, args)
-            except queue.Empty:
-                continue
-
-    def _apply_command(self, cmd: int, args: bytes):
+    def process_chunk(self, data: bytes):
         """
-        Apply a chip write command to the emulators.
+        Process a chunk of commands SYNCHRONOUSLY.
 
-        This ONLY handles chip writes - no sample generation.
-        Wait commands are ignored since sample generation runs at real-time rate.
+        Call this from the streaming thread immediately after sending
+        the chunk to hardware. This ensures perfect sync.
         """
-        with self._emu_lock:
+        if not self._running:
+            return
+
+        i = 0
+        while i < len(data):
+            cmd = data[i]
+
             if cmd == CMD_PSG_WRITE:
-                if args:
-                    self.sn76489.write(args[0])
-                    # Check for key changes
-                    psg_byte = args[0]
-                    if psg_byte & 0x80 and psg_byte & 0x10:  # Attenuation latch
-                        channel = (psg_byte >> 5) & 0x03
-                        atten = psg_byte & 0x0F
-                        is_on = atten < 15
-                        if self.on_key_change:
-                            self.on_key_change(6 + channel, is_on)
+                if i + 1 < len(data):
+                    self._apply_psg_write(data[i + 1])
+                i += 2
 
             elif cmd == CMD_YM2612_WRITE_A0:
-                if len(args) >= 2:
-                    self.ym2612.write(0, args[0], args[1])
-                    self._check_ym_key_change(args[0], args[1])
+                if i + 2 < len(data):
+                    self._apply_ym_write(0, data[i + 1], data[i + 2])
+                i += 3
 
             elif cmd == CMD_YM2612_WRITE_A1:
-                if len(args) >= 2:
-                    self.ym2612.write(1, args[0], args[1])
-                    self._check_ym_key_change(args[0], args[1])
+                if i + 2 < len(data):
+                    self._apply_ym_write(1, data[i + 1], data[i + 2])
+                i += 3
+
+            elif cmd == CMD_WAIT_FRAMES:
+                if i + 2 < len(data):
+                    samples = data[i + 1] | (data[i + 2] << 8)
+                    self._generate_samples(samples)
+                i += 3
+
+            elif cmd == CMD_WAIT_NTSC:
+                self._generate_samples(FRAME_SAMPLES_NTSC)
+                i += 1
+
+            elif cmd == CMD_WAIT_PAL:
+                self._generate_samples(FRAME_SAMPLES_PAL)
+                i += 1
+
+            elif 0x70 <= cmd <= 0x7F:
+                # Short wait (1-16 samples)
+                samples = (cmd & 0x0F) + 1
+                self._generate_samples(samples)
+                i += 1
 
             elif 0x80 <= cmd <= 0x8F:
-                # DAC write - apply immediately
-                if args:
-                    self.ym2612.write(0, 0x2A, args[0])
+                # DAC + wait
+                if i + 1 < len(data):
+                    self.ym2612.write(0, 0x2A, data[i + 1])
+                wait_samples = cmd & 0x0F
+                if wait_samples > 0:
+                    self._generate_samples(wait_samples)
+                i += 2
 
-            # All wait commands (0x61, 0x62, 0x63, 0x70-0x7F, 0xC0) are ignored
-            # because sample generation runs at constant real-time rate
+            elif cmd == CMD_RLE_WAIT_FRAME_1:
+                if i + 1 < len(data):
+                    total_samples = data[i + 1] * FRAME_SAMPLES_NTSC
+                    self._generate_samples(total_samples)
+                i += 2
 
-    def _run_samples(self):
-        """Generate samples at real-time rate (60 fps)."""
-        import time
-        frame_time = self.SAMPLES_PER_UPDATE / self.SAMPLE_RATE  # ~16.7ms
+            elif cmd == CMD_END_OF_STREAM:
+                i += 1
 
-        while self._running:
-            start = time.perf_counter()
+            else:
+                i += 1
 
-            # Generate one frame of samples
-            with self._emu_lock:
-                fm_waves = self.ym2612.generate_samples(self.SAMPLES_PER_UPDATE)
-                psg_waves = self.sn76489.generate_samples(self.SAMPLES_PER_UPDATE)
+    def process_command(self, cmd: int, args: bytes):
+        """
+        Process a single command (for offline mode).
 
-            # Send to visualizer
-            if self.on_waveform_update:
-                for ch in range(6):
-                    self.on_waveform_update(ch, fm_waves[ch])
-                for ch in range(4):
-                    self.on_waveform_update(6 + ch, psg_waves[ch])
+        This is the parsed command format, not raw bytes.
+        """
+        if not self._running:
+            return
 
-            # Sleep to maintain real-time rate
-            elapsed = time.perf_counter() - start
-            sleep_time = frame_time - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+        if cmd == CMD_PSG_WRITE:
+            if args:
+                self._apply_psg_write(args[0])
+
+        elif cmd == CMD_YM2612_WRITE_A0:
+            if len(args) >= 2:
+                self._apply_ym_write(0, args[0], args[1])
+
+        elif cmd == CMD_YM2612_WRITE_A1:
+            if len(args) >= 2:
+                self._apply_ym_write(1, args[0], args[1])
+
+        elif cmd == CMD_WAIT_FRAMES:
+            if len(args) >= 2:
+                samples = args[0] | (args[1] << 8)
+                self._generate_samples(samples)
+
+        elif cmd == CMD_WAIT_NTSC:
+            self._generate_samples(FRAME_SAMPLES_NTSC)
+
+        elif cmd == CMD_WAIT_PAL:
+            self._generate_samples(FRAME_SAMPLES_PAL)
+
+        elif 0x70 <= cmd <= 0x7F:
+            samples = (cmd & 0x0F) + 1
+            self._generate_samples(samples)
+
+        elif 0x80 <= cmd <= 0x8F:
+            if args:
+                self.ym2612.write(0, 0x2A, args[0])
+            wait_samples = cmd & 0x0F
+            if wait_samples > 0:
+                self._generate_samples(wait_samples)
+
+        elif cmd == CMD_RLE_WAIT_FRAME_1:
+            if args:
+                total_samples = args[0] * FRAME_SAMPLES_NTSC
+                self._generate_samples(total_samples)
+
+    def _apply_psg_write(self, value: int):
+        """Apply a PSG write and check for key changes."""
+        self.sn76489.write(value)
+
+        # Check for key changes (attenuation commands)
+        if value & 0x80 and value & 0x10:  # Attenuation latch
+            channel = (value >> 5) & 0x03
+            atten = value & 0x0F
+            is_on = atten < 15
+            if self.on_key_change:
+                self.on_key_change(6 + channel, is_on)
+
+    def _apply_ym_write(self, port: int, addr: int, data: int):
+        """Apply a YM2612 write and check for key changes."""
+        self.ym2612.write(port, addr, data)
+        self._check_ym_key_change(addr, data)
+
+    def _generate_samples(self, num_samples: int):
+        """Generate samples and buffer them for visualization."""
+        if num_samples <= 0:
+            return
+
+        # Generate from both chips
+        fm_waves = self.ym2612.generate_samples(num_samples)
+        psg_waves = self.sn76489.generate_samples(num_samples)
+
+        # Add to buffers
+        for ch in range(6):
+            self._fm_buffers[ch].extend(fm_waves[ch])
+        for ch in range(4):
+            self._psg_buffers[ch].extend(psg_waves[ch])
+
+        # Check if we have enough samples to send
+        buffer_len = len(self._fm_buffers[0])
+        if buffer_len >= self.MIN_SAMPLES_FOR_UPDATE:
+            self._flush_buffers()
+
+    def _flush_buffers(self):
+        """Send buffered samples to visualizer."""
+        if not self.on_waveform_update:
+            # Clear buffers if no callback
+            self._fm_buffers = [[] for _ in range(6)]
+            self._psg_buffers = [[] for _ in range(4)]
+            return
+
+        # Send FM channels
+        for ch in range(6):
+            if self._fm_buffers[ch]:
+                samples = np.array(self._fm_buffers[ch], dtype=np.float32)
+                # Send in chunks if too large
+                while len(samples) > 0:
+                    chunk = samples[:self.MAX_SAMPLES_FOR_UPDATE]
+                    samples = samples[self.MAX_SAMPLES_FOR_UPDATE:]
+                    self.on_waveform_update(ch, chunk)
+                self._fm_buffers[ch] = []
+
+        # Send PSG channels
+        for ch in range(4):
+            if self._psg_buffers[ch]:
+                samples = np.array(self._psg_buffers[ch], dtype=np.float32)
+                while len(samples) > 0:
+                    chunk = samples[:self.MAX_SAMPLES_FOR_UPDATE]
+                    samples = samples[self.MAX_SAMPLES_FOR_UPDATE:]
+                    self.on_waveform_update(6 + ch, chunk)
+                self._psg_buffers[ch] = []
 
     def _check_ym_key_change(self, addr: int, data: int):
         """Check for key-on/off changes in YM2612 writes."""

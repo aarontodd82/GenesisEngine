@@ -110,8 +110,9 @@ class VisualizerApp:
         # FFT size for autocorrelation-based pitch detection (Furnace uses 4096)
         self.fft_size = 4096
 
-        # Display window size in milliseconds (Furnace default is ~10ms)
-        self.window_size_ms = 12.0
+        # Display window size in milliseconds
+        # Smaller = fewer cycles shown = more spread out waveform
+        self.window_size_ms = 6.0
 
         # Detected periods for each channel (in samples)
         self.detected_periods = [0] * self.TOTAL_CHANNELS

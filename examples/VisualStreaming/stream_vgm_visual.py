@@ -1064,15 +1064,23 @@ class VisualStreamer:
     """
     Manages streaming with visualization.
 
-    Runs the streamer in a background thread while the GUI runs in the main thread.
+    PARALLEL REAL-TIME DESIGN:
+    - Streaming thread: sends data to hardware as fast as allowed
+    - Visualization thread: processes commands at real-time rate on its own clock
+
+    Both start at the same time, so they stay synchronized.
+    The visualization is NOT tied to when chunks are sent - it runs on wall-clock time.
     """
 
     def __init__(self):
         self.app: VisualizerApp = None
         self.interceptor: CommandInterceptor = None
         self.streaming_thread: threading.Thread = None
+        self.viz_thread: threading.Thread = None
         self.stop_event = threading.Event()
         self.stream_result = None
+        self.commands = None  # Preprocessed commands for visualization
+        self.start_time = None  # When playback started
 
     def stream_with_visualization(self, port, baud, vgm_path, dac_rate=None,
                                    no_dac=False, loop_count=None):
@@ -1090,8 +1098,11 @@ class VisualStreamer:
 
         # Set up file info
         filename = os.path.basename(vgm_path)
-        self.app.set_playback_info(filename, 0)  # Duration updated later
+        self.app.set_playback_info(filename, 0)
         self.app.set_status("Loading...")
+
+        # Preprocess VGM for visualization (same processing as streaming)
+        self._preprocess_for_viz(vgm_path, dac_rate, no_dac)
 
         # Start interceptor
         self.interceptor.start()
@@ -1110,34 +1121,102 @@ class VisualStreamer:
         except KeyboardInterrupt:
             pass
         finally:
-            # Signal streaming to stop
             self.stop_event.set()
             self.interceptor.stop()
-
-            # Wait for streaming thread
             if self.streaming_thread and self.streaming_thread.is_alive():
                 self.streaming_thread.join(timeout=2.0)
+            if self.viz_thread and self.viz_thread.is_alive():
+                self.viz_thread.join(timeout=2.0)
 
         return self.stream_result if self.stream_result is not None else False
 
+    def _preprocess_for_viz(self, vgm_path, dac_rate, no_dac):
+        """Preprocess VGM for visualization - same processing as streaming."""
+        with open(vgm_path, 'rb') as f:
+            data = f.read()
+        data = decompress_vgz(data)
+        header = parse_vgm_header(data)
+        if not header:
+            return
+
+        self.total_duration = header['duration']
+
+        # Preprocess same as streaming
+        commands, loop_index = preprocess_vgm(data, header['data_offset'], header['loop_offset'])
+
+        # Apply same DAC processing as streaming would
+        if no_dac:
+            commands, loop_index = strip_dac(commands, loop_index)
+        elif dac_rate and dac_rate > 1:
+            commands, loop_index = apply_dac_rate_reduction(commands, dac_rate, loop_index)
+
+        # Apply same wait optimization
+        commands, loop_index = apply_wait_optimization(commands, loop_index)
+
+        self.commands = commands
+        self.loop_index = loop_index
+
     def _stream_thread(self, port, baud, vgm_path, dac_rate, no_dac, loop_count):
-        """Background streaming thread with command interception."""
+        """Background streaming thread."""
         try:
             self.stream_result = stream_vgm_visual_internal(
                 port, baud, vgm_path, dac_rate, no_dac, loop_count,
-                command_callback=self._on_command,
+                chunk_callback=None,  # Don't process chunks in streaming thread
                 progress_callback=self._on_progress,
                 status_callback=self._on_status,
-                stop_event=self.stop_event
+                stop_event=self.stop_event,
+                start_callback=self._on_stream_start  # NEW: called when streaming actually starts
             )
         except Exception as e:
             print(f"Streaming error: {e}")
             self.stream_result = False
 
-    def _on_command(self, cmd: int, args: bytes):
-        """Called for each command sent to hardware."""
-        if self.interceptor:
-            self.interceptor.queue_command(cmd, args)
+    def _on_stream_start(self):
+        """Called when hardware streaming actually starts - launch visualization."""
+        self.start_time = time.time()
+        self.viz_thread = threading.Thread(target=self._viz_thread_run, daemon=True)
+        self.viz_thread.start()
+
+    def _viz_thread_run(self):
+        """Visualization thread - runs at real-time rate on wall clock."""
+        if not self.commands:
+            return
+
+        cmd_idx = 0
+        samples_processed = 0
+
+        while not self.stop_event.is_set() and cmd_idx < len(self.commands):
+            cmd, args = self.commands[cmd_idx]
+            cmd_idx += 1
+
+            # Process command
+            self.interceptor.process_command(cmd, args)
+
+            # Calculate samples for this command
+            wait_samples = 0
+            if cmd == CMD_WAIT_NTSC:
+                wait_samples = FRAME_SAMPLES_NTSC
+            elif cmd == CMD_WAIT_PAL:
+                wait_samples = FRAME_SAMPLES_PAL
+            elif cmd == CMD_WAIT_FRAMES and len(args) >= 2:
+                wait_samples = args[0] | (args[1] << 8)
+            elif 0x70 <= cmd <= 0x7F:
+                wait_samples = (cmd & 0x0F) + 1
+            elif 0x80 <= cmd <= 0x8F:
+                wait_samples = cmd & 0x0F
+            elif cmd == CMD_RLE_WAIT_FRAME_1 and args:
+                wait_samples = args[0] * FRAME_SAMPLES_NTSC
+            elif cmd == CMD_END_OF_STREAM:
+                break
+
+            if wait_samples > 0:
+                samples_processed += wait_samples
+
+                # Wait until real-time catches up
+                target_time = self.start_time + (samples_processed / 44100.0)
+                now = time.time()
+                if target_time > now:
+                    time.sleep(target_time - now)
 
     def _on_progress(self, progress: float, elapsed: float, total: float):
         """Called to update progress."""
@@ -1152,13 +1231,14 @@ class VisualStreamer:
 
 
 def stream_vgm_visual_internal(port, baud, vgm_path, dac_rate=None, no_dac=False,
-                               loop_count=None, command_callback=None,
+                               loop_count=None, chunk_callback=None,
                                progress_callback=None, status_callback=None,
-                               stop_event=None):
+                               stop_event=None, start_callback=None):
     """
     Stream VGM file with callbacks for visualization.
 
     This is the same as stream_vgm but with hooks for the visualizer.
+    chunk_callback receives raw chunk data for async processing (doesn't block streaming).
     """
 
     def update_status(msg):
@@ -1265,15 +1345,15 @@ def stream_vgm_visual_internal(port, baud, vgm_path, dac_rate=None, no_dac=False
     # Convert to bytes
     stream_data, loop_byte_offset = commands_to_bytes(commands, loop_index)
 
-    # Send commands to interceptor before streaming begins (for initial state)
-    if command_callback:
-        for cmd, args in commands[:100]:  # First 100 commands for initial setup
-            command_callback(cmd, args)
-
     ser.reset_input_buffer()
 
     # Stream data
     update_status("Streaming...")
+
+    # Signal that streaming is starting (for synchronized visualization)
+    if start_callback:
+        start_callback()
+
     pos = 0
     start_time = time.time()
     last_progress = -1
@@ -1281,11 +1361,9 @@ def stream_vgm_visual_internal(port, baud, vgm_path, dac_rate=None, no_dac=False
     pending_chunks = []
     chunks_sent = 0
 
-    # Track which command we're on for visualization
-    command_byte_pos = 0
-
     def send_chunk(data):
-        nonlocal chunks_sent, command_byte_pos
+        """Send chunk to hardware and queue for visualization (non-blocking)."""
+        nonlocal chunks_sent
         chunks_sent += 1
         length = len(data)
         checksum = length
@@ -1294,43 +1372,9 @@ def stream_vgm_visual_internal(port, baud, vgm_path, dac_rate=None, no_dac=False
         packet = bytes([CHUNK_HEADER, length]) + data + bytes([checksum & 0xFF])
         ser.write(packet)
 
-        # Send chunk bytes to interceptor for visualization
-        if command_callback:
-            # Parse commands from chunk data
-            i = 0
-            while i < len(data):
-                cmd = data[i]
-                if cmd == CMD_PSG_WRITE:
-                    if i + 1 < len(data):
-                        command_callback(cmd, bytes([data[i + 1]]))
-                    i += 2
-                elif cmd in (CMD_YM2612_WRITE_A0, CMD_YM2612_WRITE_A1):
-                    if i + 2 < len(data):
-                        command_callback(cmd, bytes([data[i + 1], data[i + 2]]))
-                    i += 3
-                elif cmd == CMD_WAIT_FRAMES:
-                    if i + 2 < len(data):
-                        command_callback(cmd, bytes([data[i + 1], data[i + 2]]))
-                    i += 3
-                elif cmd in (CMD_WAIT_NTSC, CMD_WAIT_PAL):
-                    command_callback(cmd, b'')
-                    i += 1
-                elif 0x70 <= cmd <= 0x7F:
-                    command_callback(cmd, b'')
-                    i += 1
-                elif 0x80 <= cmd <= 0x8F:
-                    if i + 1 < len(data):
-                        command_callback(cmd, bytes([data[i + 1]]))
-                    i += 2
-                elif cmd == CMD_RLE_WAIT_FRAME_1:
-                    if i + 1 < len(data):
-                        command_callback(cmd, bytes([data[i + 1]]))
-                    i += 2
-                elif cmd == CMD_END_OF_STREAM:
-                    command_callback(cmd, b'')
-                    i += 1
-                else:
-                    i += 1
+        # Queue chunk for async visualization processing (doesn't block streaming)
+        if chunk_callback:
+            chunk_callback(bytes(data))
 
     def check_responses():
         acks = 0
@@ -1489,6 +1533,106 @@ def run_visual_streamer(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_
     return streamer.stream_with_visualization(port, baud, vgm_path, dac_rate, no_dac, loop_count)
 
 
+def run_offline_visualizer(vgm_path, loop_count=None):
+    """Run visualization without hardware - emulator only."""
+    if not _HAS_VISUALIZATION:
+        print("ERROR: Visualization not available. Install imgui-bundle.")
+        return False
+
+    # Load and parse VGM
+    print(f"Loading: {os.path.basename(vgm_path)}")
+    with open(vgm_path, 'rb') as f:
+        data = f.read()
+
+    data = decompress_vgz(data)
+    header = parse_vgm_header(data)
+    if not header:
+        print("ERROR: Not a valid VGM file!")
+        return False
+
+    total_duration = header['duration']
+    print(f"Duration: {int(total_duration//60)}:{int(total_duration%60):02d}")
+
+    # Preprocess
+    commands, loop_index = preprocess_vgm(data, header['data_offset'], header['loop_offset'])
+    print(f"Commands: {len(commands)}")
+
+    # Create visualizer and interceptor
+    app = VisualizerApp()
+    interceptor = CommandInterceptor()
+    interceptor.on_waveform_update = app.update_waveform
+    interceptor.on_key_change = app.set_key_on
+
+    filename = os.path.basename(vgm_path)
+    app.set_playback_info(filename, total_duration)
+    app.set_status("Offline playback")
+
+    interceptor.start()
+
+    # Playback thread
+    stop_event = threading.Event()
+
+    def playback_thread():
+        start_time = time.time()
+        cmd_idx = 0
+        samples_played = 0
+
+        while not stop_event.is_set() and cmd_idx < len(commands):
+            cmd, args = commands[cmd_idx]
+            cmd_idx += 1
+
+            # Process command synchronously
+            interceptor.process_command(cmd, args)
+
+            # Calculate wait time for timing commands
+            wait_samples = 0
+            if cmd == CMD_WAIT_NTSC:
+                wait_samples = FRAME_SAMPLES_NTSC
+            elif cmd == CMD_WAIT_PAL:
+                wait_samples = FRAME_SAMPLES_PAL
+            elif cmd == CMD_WAIT_FRAMES and len(args) >= 2:
+                wait_samples = args[0] | (args[1] << 8)
+            elif 0x70 <= cmd <= 0x7F:
+                wait_samples = (cmd & 0x0F) + 1
+            elif 0x80 <= cmd <= 0x8F:
+                wait_samples = cmd & 0x0F
+            elif cmd == CMD_RLE_WAIT_FRAME_1 and args:
+                wait_samples = args[0] * FRAME_SAMPLES_NTSC
+            elif cmd == CMD_END_OF_STREAM:
+                # Handle looping
+                if loop_count is not None and loop_index is not None:
+                    cmd_idx = loop_index
+                    continue
+                break
+
+            if wait_samples > 0:
+                samples_played += wait_samples
+                # Update progress
+                elapsed = samples_played / 44100.0
+                progress = min(100, elapsed / total_duration * 100) if total_duration > 0 else 0
+                app.set_progress(progress, elapsed)
+
+                # Real-time delay
+                target_time = start_time + elapsed
+                sleep_time = target_time - time.time()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+
+        app.set_status("Playback complete")
+
+    thread = threading.Thread(target=playback_thread, daemon=True)
+    thread.start()
+
+    # Run GUI
+    try:
+        app.run(title=f"Genesis Visualizer (Offline) - {filename}")
+    finally:
+        stop_event.set()
+        interceptor.stop()
+
+    return True
+
+
 # =============================================================================
 # Main
 # =============================================================================
@@ -1536,6 +1680,8 @@ Looping:
                         help='Loop playback: --loop for infinite, --loop N to play N times')
     parser.add_argument('--verbose', '-v', action='store_true',
                         help='Verbose output')
+    parser.add_argument('--offline', action='store_true',
+                        help='Run visualization without hardware (emulator only)')
 
     args = parser.parse_args()
 
@@ -1550,6 +1696,11 @@ Looping:
     if not os.path.exists(args.file):
         print(f"ERROR: File not found: {args.file}")
         return 1
+
+    # Offline mode - no hardware needed
+    if args.offline:
+        success = run_offline_visualizer(args.file, loop_count=args.loop)
+        return 0 if success else 1
 
     port = args.port or find_arduino_port()
     if not port:
