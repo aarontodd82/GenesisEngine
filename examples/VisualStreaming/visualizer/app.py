@@ -107,33 +107,22 @@ class VisualizerApp:
         # Track how much valid data is in each buffer (starts at 0, grows to WAVEFORM_SAMPLES)
         self.valid_samples = [0] * self.TOTAL_CHANNELS
 
-        # FFT size for autocorrelation-based pitch detection (Furnace uses 4096)
-        self.fft_size = 4096
-
-        # Fixed display window size in samples (Furnace uses user-configurable ms)
-        # ~5.8ms at 44100Hz = 256 samples - small enough to see clear waveforms
+        # Fixed display window size in samples
+        # ~5.8ms at 44100Hz = 256 samples
         self.display_samples = 256
 
-        # Detected periods for each channel (in samples)
-        self.detected_periods = [0] * self.TOTAL_CHANNELS
+        # --- Trigger state ---
 
-        # Detected phases for each channel (0.0 to 1.0)
-        self.detected_phases = [0.0] * self.TOTAL_CHANNELS
+        # Trigger offset from END of buffer (stable reference frame)
+        self.trigger_offset = [self.display_samples + 50] * self.TOTAL_CHANNELS
 
-        # Smoothed needle positions for each channel (Furnace-style phase-locked display)
-        self.needle_pos = [0.0] * self.TOTAL_CHANNELS
+        # Samples added since last frame (for continuity tracking)
+        self.samples_since_last_frame = [0] * self.TOTAL_CHANNELS
 
-        # Total samples received per channel (like Furnace's buf->needle)
-        # This continuously advances and provides frame-to-frame continuity
-        self.total_samples_received = [0] * self.TOTAL_CHANNELS
+        # Smoothed period estimate (in samples)
+        self.smoothed_period = [20.0] * self.TOTAL_CHANNELS
 
-        # Previous periods for smoothing
-        self.prev_periods = [0.0] * self.TOTAL_CHANNELS
-
-        # Needle smoothing factor (higher = smoother but slower response)
-        self.needle_smoothing = 0.92
-
-        # Period smoothing factor
+        # Period smoothing factor (higher = more stable)
         self.period_smoothing = 0.95
 
         # Amplitude scaling per channel (for auto-gain)
@@ -156,182 +145,161 @@ class VisualizerApp:
                 samples = min(len(data), self.WAVEFORM_SAMPLES)
                 self.waveforms[channel] = np.roll(self.waveforms[channel], -samples)
                 self.waveforms[channel][-samples:] = data[-samples:]
+
                 # Track valid data (caps at buffer size)
                 self.valid_samples[channel] = min(
                     self.valid_samples[channel] + samples,
                     self.WAVEFORM_SAMPLES
                 )
-                # Track total samples received (like Furnace's buf->needle)
-                # This provides frame-to-frame continuity for phase-locking
-                self.total_samples_received[channel] += len(data)
 
-    def _furnace_process_fft(self, channel_idx: int, data: np.ndarray, display_size: int):
+                # Accumulate samples for frame-to-frame continuity
+                self.samples_since_last_frame[channel] += samples
+
+    def _estimate_period(self, channel_idx: int, data: np.ndarray) -> float:
         """
-        Furnace's exact FFT processing for oscilloscope.
-        Updates detected period, phase, and needle position for the channel.
+        Estimate waveform period using zero-crossing analysis.
+        Returns smoothed period estimate, or 0 if can't detect.
 
-        Key insight: The needle is based on total_samples_received which continuously
-        advances like Furnace's buf->needle. This provides frame-to-frame continuity.
+        Simpler than FFT autocorrelation but works well for FM/PSG.
         """
-        FFT_SIZE = self.fft_size  # 4096
-        BUFFER_SIZE = self.WAVEFORM_SAMPLES  # 8192
-
         n = len(data)
-        if n < FFT_SIZE:
-            return
+        if n < 64:
+            return self.smoothed_period[channel_idx]
+
+        # Use recent samples for period detection
+        chunk = data[-1024:] if n >= 1024 else data
 
         # Check if loud enough
-        max_val = np.abs(data[-FFT_SIZE:]).max()
-        if max_val < 0.001:
-            return
+        max_val = np.abs(chunk).max()
+        if max_val < 0.01:
+            return self.smoothed_period[channel_idx]
 
-        # Get the current stream position (like Furnace's buf->needle)
-        stream_pos = self.total_samples_received[channel_idx]
+        # Find zero crossings (rising edges: negative to positive)
+        crossings = []
+        for i in range(1, len(chunk)):
+            if chunk[i-1] <= 0 and chunk[i] > 0:
+                crossings.append(i)
 
-        # Prepare input buffer with Hamming window (Furnace: 0.55 - 0.45*cos)
-        in_buf = np.zeros(FFT_SIZE, dtype=np.float64)
-        for j in range(FFT_SIZE):
-            sample = data[n - FFT_SIZE + j]
-            in_buf[j] = float(sample)
-            # Hamming window
-            in_buf[j] *= 0.55 - 0.45 * np.cos(np.pi * j / (FFT_SIZE >> 1))
+        if len(crossings) < 2:
+            return self.smoothed_period[channel_idx]
 
-        # FFT
-        fft_out = np.fft.rfft(in_buf)
+        # Calculate average period from zero-crossing spacing
+        periods = []
+        for i in range(1, len(crossings)):
+            p = crossings[i] - crossings[i-1]
+            if 4 <= p <= 500:  # Reasonable period range
+                periods.append(p)
 
-        # Power spectrum (magnitude squared)
-        power = np.abs(fft_out) ** 2
+        if not periods:
+            return self.smoothed_period[channel_idx]
 
-        # Inverse FFT for autocorrelation
-        corr_buf = np.fft.irfft(power, FFT_SIZE)
+        # Use median for robustness against outliers
+        raw_period = float(np.median(periods))
 
-        # Find size of period - scan BACKWARDS from FFT_SIZE/4 to find lowest
-        wave_len_cand_l = float('inf')
-        wave_len_bottom = 2
-        for j in range(FFT_SIZE >> 2, 2, -1):
-            if corr_buf[j] < wave_len_cand_l:
-                wave_len_cand_l = corr_buf[j]
-                wave_len_bottom = j
+        # Octave stabilization: if new period is ~half or ~double, snap to harmonic
+        prev = self.smoothed_period[channel_idx]
+        if prev > 0:
+            ratio = raw_period / prev
+            if 0.4 < ratio < 0.6:
+                raw_period *= 2.0  # Was detecting octave up, correct it
+            elif 1.7 < ratio < 2.3:
+                raw_period *= 0.5  # Was detecting octave down, correct it
 
-        # Find highest point scanning backwards from FFT_SIZE/2 to wave_len_bottom
-        wave_len_cand_h = float('-inf')
-        wave_len = FFT_SIZE - 1
-        for j in range((FFT_SIZE >> 1) - 1, wave_len_bottom, -1):
-            if corr_buf[j] > wave_len_cand_h:
-                wave_len_cand_h = corr_buf[j]
-                wave_len = j
+            # Heavy smoothing for stability
+            smoothed = prev * self.period_smoothing + raw_period * (1 - self.period_smoothing)
+        else:
+            smoothed = raw_period
 
-        # Check if we got a valid period
-        if wave_len >= FFT_SIZE - 32:
-            return  # No valid period found
+        self.smoothed_period[channel_idx] = smoothed
+        return smoothed
 
-        # Scale waveLen by displaySize (Furnace: waveLen *= displaySize*2.0/FFT_SIZE)
-        wave_len_scaled = wave_len * (display_size * 2.0 / FFT_SIZE)
+    def _find_trigger(self, channel_idx: int, data: np.ndarray, display_samples: int, samples_advanced: int) -> int:
+        """
+        Frame-continuous trigger: track position and find nearest zero crossing.
 
-        # Smooth the period
-        prev_period = self.prev_periods[channel_idx]
-        if prev_period > 0:
-            wave_len_scaled = prev_period * 0.9 + wave_len_scaled * 0.1
-        self.prev_periods[channel_idx] = wave_len_scaled
-        self.detected_periods[channel_idx] = int(wave_len_scaled)
+        The display smoothly advances with the audio, but snaps to zero crossings
+        for stability. When jumping, picks a crossing with similar waveform shape.
+        """
+        n = len(data)
+        compare_len = 32  # Samples to compare for shape matching
 
-        # DFT of one period to get phase
-        if wave_len_scaled >= 4:
-            dft_real = 0.0
-            dft_imag = 0.0
+        # Get last trigger offset (from end of buffer)
+        last_offset = self.trigger_offset[channel_idx]
 
-            # Sample one period from near the end of buffer
-            wave_len_int = int(wave_len_scaled)
-            start_pos = n - display_size - wave_len_int
+        # The buffer rolled by samples_advanced, so our trigger moved back
+        expected_offset = last_offset + samples_advanced
 
-            for k in range(wave_len_int):
-                idx = start_pos + k
-                if 0 <= idx < n:
-                    sample = float(data[idx])
-                else:
-                    sample = 0.0
-                angle = k * (-2.0 * np.pi) / wave_len_scaled
-                dft_real += sample * np.cos(angle)
-                dft_imag += sample * np.sin(angle)
+        max_offset = display_samples * 4
+        min_offset = display_samples
 
-            # Calculate phase (Furnace: 0.5 + atan2/(2*pi))
-            phase = 0.5 + (np.arctan2(dft_imag, dft_real) / (2.0 * np.pi))
-            self.detected_phases[channel_idx] = phase
+        # Check if we need to jump
+        needs_jump = expected_offset > max_offset
 
-            # Debug: print values for channel 0 every ~1 second
-            if channel_idx == 0 and stream_pos % 44100 < 1000:
-                import sys
-                print(f"CH0: period={wave_len_scaled:.1f}, phase={phase:.3f}, offset={phase * wave_len_scaled:.1f}", flush=True)
+        if needs_jump:
+            # Capture template of current waveform shape
+            current_idx = n - int(min(expected_offset, n - compare_len - 10))
+            current_idx = max(0, min(current_idx, n - compare_len))
+            template = data[current_idx:current_idx + compare_len]
+            template_norm = np.linalg.norm(template)
 
-            # Calculate needle in STREAM coordinates (like Furnace)
-            # Start with current stream position, back up by display size
-            needle = float(stream_pos) - display_size
+            # Search for best matching zero crossing
+            best_idx = n - display_samples - 50  # fallback
+            best_score = -1
 
-            # Apply phase correction (Furnace: needle -= phase * waveLen)
-            needle -= phase * wave_len_scaled
+            search_start = n - max_offset
+            search_end = n - min_offset
 
-            # The needle position should be smoothed to prevent jumps
-            # But we need to handle the fact that stream_pos keeps increasing
-            current_needle = self.needle_pos[channel_idx]
+            for i in range(max(1, search_start), min(n - display_samples - compare_len, search_end)):
+                if data[i-1] <= 0 < data[i]:
+                    # Compare waveform shape after this crossing
+                    candidate = data[i:i + compare_len]
+                    candidate_norm = np.linalg.norm(candidate)
 
-            if current_needle == 0:
-                # First time - initialize
-                self.needle_pos[channel_idx] = needle
+                    if template_norm > 0.01 and candidate_norm > 0.01:
+                        # Normalized correlation
+                        score = np.dot(template, candidate) / (template_norm * candidate_norm)
+                    else:
+                        score = 0
+
+                    if score > best_score:
+                        best_score = score
+                        best_idx = i
+
+            # Only use the match if it's reasonably good
+            if best_score > 0.5:
+                new_offset = n - best_idx
             else:
-                # Calculate expected needle based on samples received since last update
-                # The needle should advance at the same rate as stream_pos
-                expected_advance = stream_pos - (current_needle + display_size + phase * wave_len_scaled)
+                # No good match - just find any rising crossing
+                for i in range(search_end, search_start, -1):
+                    if i > 0 and data[i-1] <= 0 < data[i]:
+                        new_offset = n - i
+                        break
+                else:
+                    new_offset = display_samples + 50
+        else:
+            # Normal case: find nearest zero crossing to expected position
+            expected_offset = max(min_offset, min(expected_offset, max_offset))
+            expected_idx = n - int(expected_offset)
 
-                # Only apply phase correction, don't fight the stream advancement
-                target_needle = float(stream_pos) - display_size - phase * wave_len_scaled
+            search_radius = 50
+            best_idx = expected_idx
+            best_dist = float('inf')
 
-                # Smooth only the phase-corrected offset, not the base position
-                phase_offset = target_needle - (stream_pos - display_size)
-                current_offset = current_needle - (stream_pos - display_size - expected_advance)
+            for i in range(max(1, expected_idx - search_radius), min(n - display_samples, expected_idx + search_radius)):
+                if data[i-1] <= 0 < data[i]:
+                    dist = abs(i - expected_idx)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_idx = i
 
-                # Smooth the offset
-                smoothed_offset = current_offset * self.needle_smoothing + phase_offset * (1 - self.needle_smoothing)
+            new_offset = n - best_idx
 
-                self.needle_pos[channel_idx] = (stream_pos - display_size) + smoothed_offset
+        # Clamp and store
+        new_offset = max(min_offset, min(new_offset, max_offset))
+        self.trigger_offset[channel_idx] = new_offset
 
-    def _get_display_position(self, channel_idx: int, data: np.ndarray,
-                               valid_samples: int, display_samples: int) -> int:
-        """
-        Get display position using Furnace-style phase-locked display.
-        """
-        buffer_len = len(data)
-        BUFFER_SIZE = self.WAVEFORM_SAMPLES
-
-        if valid_samples < display_samples + self.fft_size:
-            return -1
-
-        # Run Furnace's FFT processing
-        self._furnace_process_fft(channel_idx, data, display_samples)
-
-        # Get the needle position (in stream coordinates)
-        stream_needle = self.needle_pos[channel_idx]
-        stream_pos = self.total_samples_received[channel_idx]
-
-        if stream_needle <= 0:
-            # Fallback - just show recent samples
-            return buffer_len - display_samples
-
-        # Convert stream position to buffer position
-        # The buffer holds the last BUFFER_SIZE samples
-        # stream_pos points to "just after the last sample in buffer"
-        # stream_needle is where we want to start reading
-
-        # How far back from current position?
-        samples_back = stream_pos - stream_needle
-
-        # Convert to buffer index (buffer end is at buffer_len)
-        buffer_idx = buffer_len - int(samples_back)
-
-        # Clamp to valid range
-        valid_start = buffer_len - valid_samples
-        buffer_idx = max(valid_start, min(buffer_idx, buffer_len - display_samples))
-
-        return buffer_idx
+        trigger_idx = n - int(new_offset)
+        return max(0, min(trigger_idx, n - display_samples))
 
     def set_key_on(self, channel: int, on: bool):
         """Set key-on state for a channel."""
@@ -363,24 +331,27 @@ class VisualizerApp:
         color = self.channel_colors[channel_idx]
         is_active = self.key_on[channel_idx]
 
-        # Get waveform data and valid count with lock
+        # Get waveform data with lock
         with self._lock:
             full_data = self.waveforms[channel_idx].copy()
             valid_count = self.valid_samples[channel_idx]
+            samples_advanced = self.samples_since_last_frame[channel_idx]
+            self.samples_since_last_frame[channel_idx] = 0  # Reset for next frame
 
         # Noise channel (9) and DAC channel (5) use scrolling mode
         is_noise = (channel_idx == 9)
         is_dac = (channel_idx == 5)
 
-        # Fixed display window (Furnace-style: user-configurable, period only for phase alignment)
+        # Fixed display window
         display_samples = self.display_samples
 
         # Use triggered display for tonal FM/PSG channels, scrolling for noise/DAC
         if self.triggered_display and not is_noise and not is_dac:
-            # Phase-locked display mode (like Furnace)
-            trigger_idx = self._get_display_position(channel_idx, full_data, valid_count, display_samples)
-            if trigger_idx >= 0:
-                y_data = full_data[trigger_idx:trigger_idx + display_samples].copy()
+            if valid_count >= display_samples * 2:
+                # Frame-continuous trigger with zero-crossing lock
+                trigger_idx = int(self._find_trigger(channel_idx, full_data, display_samples, samples_advanced))
+                end_idx = int(trigger_idx + display_samples)
+                y_data = full_data[trigger_idx:end_idx].copy()
             elif valid_count >= display_samples:
                 y_data = full_data[-display_samples:].copy()
             else:
