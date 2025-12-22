@@ -403,21 +403,28 @@ class VisualizerApp:
             else:
                 y_data = np.zeros(display_samples, dtype=np.float32)
 
-        # Auto-scale amplitude (like Furnace's amplitude control)
+        # Auto-scale amplitude - smarter scaling that never clips
         max_amp = np.abs(y_data).max()
         if max_amp > 0.001:
             # Calculate desired scale to reach target amplitude
             desired_scale = self.target_amplitude / max_amp
 
-            # Smooth the scale factor
+            # Also calculate max safe scale (never exceed ±1.0 output)
+            safe_scale = 0.95 / max_amp  # Leave 5% headroom
+
+            # Use the smaller of desired and safe scale
+            target_scale = min(desired_scale, safe_scale, self.max_amplitude_scale)
+
+            # Smooth the scale - but react FAST to loud signals (prevent clipping)
             current_scale = self.amplitude_scale[channel_idx]
-            new_scale = current_scale * self.amplitude_smoothing + desired_scale * (1 - self.amplitude_smoothing)
+            if target_scale < current_scale:
+                # Scale down fast to prevent clipping
+                new_scale = current_scale * 0.7 + target_scale * 0.3
+            else:
+                # Scale up slowly for smooth appearance
+                new_scale = current_scale * self.amplitude_smoothing + target_scale * (1 - self.amplitude_smoothing)
 
-            # Clamp scale to reasonable range
-            new_scale = max(1.0, min(self.max_amplitude_scale, new_scale))
             self.amplitude_scale[channel_idx] = new_scale
-
-            # Apply scaling (no hard clipping - let it show naturally)
             y_data = y_data * new_scale
 
         # Create x-axis normalized to 0-1 range for consistent display
