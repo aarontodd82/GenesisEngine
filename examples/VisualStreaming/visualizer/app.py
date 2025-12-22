@@ -27,25 +27,25 @@ class VisualizerApp:
     # Furnace uses 65536 - we use 8192 for reasonable memory usage
     WAVEFORM_SAMPLES = 8192
 
-    # Colors (RGBA)
+    # Colors (RGBA) - 90s Neon aesthetic
     COLORS = {
-        # FM channels - warm colors
-        'fm1': ImVec4(1.0, 0.4, 0.2, 1.0),   # Orange-red
-        'fm2': ImVec4(1.0, 0.6, 0.2, 1.0),   # Orange
-        'fm3': ImVec4(1.0, 0.8, 0.2, 1.0),   # Yellow-orange
-        'fm4': ImVec4(0.9, 0.9, 0.3, 1.0),   # Yellow
-        'fm5': ImVec4(1.0, 0.5, 0.5, 1.0),   # Salmon
-        'fm6': ImVec4(1.0, 0.3, 0.4, 1.0),   # Red-pink (DAC)
-        # PSG channels - cool colors
-        'psg1': ImVec4(0.3, 0.8, 1.0, 1.0),  # Cyan
-        'psg2': ImVec4(0.4, 0.6, 1.0, 1.0),  # Blue
-        'psg3': ImVec4(0.5, 0.4, 1.0, 1.0),  # Purple
-        'noise': ImVec4(0.6, 0.6, 0.6, 1.0), # Gray
-        # UI colors
-        'background': ImVec4(0.1, 0.1, 0.12, 1.0),
-        'grid': ImVec4(0.2, 0.2, 0.22, 1.0),
+        # FM channels - neon/synthwave colors
+        'fm1': ImVec4(1.0, 0.1, 0.5, 1.0),   # Hot pink
+        'fm2': ImVec4(1.0, 0.4, 0.0, 1.0),   # Neon orange
+        'fm3': ImVec4(1.0, 1.0, 0.0, 1.0),   # Electric yellow
+        'fm4': ImVec4(0.0, 1.0, 0.4, 1.0),   # Hacker green
+        'fm5': ImVec4(0.0, 0.8, 1.0, 1.0),   # Electric cyan
+        'fm6': ImVec4(1.0, 0.0, 0.3, 1.0),   # Neon red (DAC)
+        # PSG channels - more neon
+        'psg1': ImVec4(0.0, 1.0, 1.0, 1.0),  # Cyan
+        'psg2': ImVec4(0.4, 0.4, 1.0, 1.0),  # Neon blue
+        'psg3': ImVec4(0.8, 0.0, 1.0, 1.0),  # Neon purple/magenta
+        'noise': ImVec4(0.0, 1.0, 0.0, 1.0), # Matrix green
+        # UI colors - darker for contrast
+        'background': ImVec4(0.05, 0.05, 0.08, 1.0),
+        'grid': ImVec4(0.15, 0.15, 0.18, 1.0),
         'text': ImVec4(0.9, 0.9, 0.9, 1.0),
-        'text_dim': ImVec4(0.5, 0.5, 0.5, 1.0),
+        'text_dim': ImVec4(0.4, 0.4, 0.5, 1.0),
     }
 
     def __init__(self):
@@ -137,6 +137,37 @@ class VisualizerApp:
         # Max amplitude scale (prevent extreme boosting that causes clipping look)
         self.max_amplitude_scale = 4.0
 
+        # DAC mode state (FM channel 6 becomes PCM output when enabled)
+        self.dac_enabled = False
+
+        # Larger display window for scrolling channels (DAC, Noise)
+        self.scroll_display_samples = 512
+
+        # Smoothed glow intensity per channel (for fade in/out)
+        self.glow_intensity = [0.0] * self.TOTAL_CHANNELS
+        self.glow_fade_speed = 0.15  # How fast glow fades in/out (0-1, higher = faster)
+
+        # Keyboard indicator glow intensity per channel (for smooth on/off transitions)
+        self.indicator_glow = [0.0] * self.TOTAL_CHANNELS
+
+        # Pitch tracking for keyboard display (continuous pitch value, 0 = no note)
+        # Stored as fractional MIDI note (e.g., 60.5 = between C4 and C#4)
+        # FM channels 0-5, PSG channels 6-8 (noise channel 9 doesn't have pitch)
+        self.channel_pitch = [0.0] * self.TOTAL_CHANNELS
+
+        # Keyboard range (MIDI notes) - full range for thin keys
+        self.keyboard_low_note = 21   # A0 (piano low)
+        self.keyboard_high_note = 108 # C8 (piano high)
+
+    def set_dac_mode(self, enabled: bool):
+        """Set DAC mode state (called when DAC enable changes)."""
+        self.dac_enabled = enabled
+
+    def set_channel_pitch(self, channel: int, pitch: float):
+        """Set the current pitch for a channel (fractional MIDI note for keyboard display)."""
+        if 0 <= channel < self.TOTAL_CHANNELS:
+            self.channel_pitch[channel] = pitch
+
     def update_waveform(self, channel: int, data: np.ndarray):
         """Update waveform data for a channel (thread-safe)."""
         if 0 <= channel < self.TOTAL_CHANNELS:
@@ -221,7 +252,7 @@ class VisualizerApp:
         for stability. When jumping, picks a crossing with similar waveform shape.
         """
         n = len(data)
-        compare_len = 32  # Samples to compare for shape matching
+        compare_len = 64  # Samples to compare for shape matching
 
         # Get last trigger offset (from end of buffer)
         last_offset = self.trigger_offset[channel_idx]
@@ -338,15 +369,17 @@ class VisualizerApp:
             samples_advanced = self.samples_since_last_frame[channel_idx]
             self.samples_since_last_frame[channel_idx] = 0  # Reset for next frame
 
-        # Noise channel (9) and DAC channel (5) use scrolling mode
+        # Noise channel (9) always scrolls
+        # DAC mode (channel 5) scrolls only when DAC is enabled
         is_noise = (channel_idx == 9)
-        is_dac = (channel_idx == 5)
+        is_dac_active = (channel_idx == 5 and self.dac_enabled)
 
-        # Fixed display window
-        display_samples = self.display_samples
+        # Scrolling channels get a larger display window
+        use_scrolling = is_noise or is_dac_active
+        display_samples = self.scroll_display_samples if use_scrolling else self.display_samples
 
         # Use triggered display for tonal FM/PSG channels, scrolling for noise/DAC
-        if self.triggered_display and not is_noise and not is_dac:
+        if self.triggered_display and not use_scrolling:
             if valid_count >= display_samples * 2:
                 # Frame-continuous trigger with zero-crossing lock
                 trigger_idx = int(self._find_trigger(channel_idx, full_data, display_samples, samples_advanced))
@@ -357,7 +390,7 @@ class VisualizerApp:
             else:
                 y_data = np.zeros(display_samples, dtype=np.float32)
         else:
-            # Simple scrolling mode for noise or when triggered display is off
+            # Simple scrolling mode for noise/DAC or when triggered display is off
             if valid_count >= display_samples:
                 y_data = full_data[-display_samples:].copy()
             elif valid_count > 0:
@@ -401,18 +434,66 @@ class VisualizerApp:
             implot.setup_axis_limits(implot.ImAxis_.x1, 0, 1, implot.Cond_.always)
             implot.setup_axis_limits(implot.ImAxis_.y1, -1.1, 1.1, implot.Cond_.always)
 
-            # Draw glow effect (thicker, semi-transparent line behind)
-            if is_active and np.abs(y_data).max() > 0.05:
-                glow_color = ImVec4(color.x, color.y, color.z, 0.3)
-                implot.push_style_color(implot.Col_.line, glow_color)
-                implot.push_style_var(implot.StyleVar_.line_weight, 4.0)
-                implot.plot_line(f"{label}_glow", x_data, y_data)
-                implot.pop_style_var()
-                implot.pop_style_color()
+            # Get plot area for ambient glow
+            plot_pos = implot.get_plot_pos()
+            plot_size = implot.get_plot_size()
+            draw_list = implot.get_plot_draw_list()
 
-            # Draw main waveform
+            # Draw gradient glow based on amplitude with smooth transitions
+            max_amp = np.abs(y_data).max()
+
+            # Calculate target glow intensity
+            target_intensity = 0.0
+            if is_active and max_amp > 0.02:
+                target_intensity = min(1.0, max_amp * 1.5)
+
+            # Smoothly transition glow intensity
+            current_intensity = self.glow_intensity[channel_idx]
+            if target_intensity > current_intensity:
+                # Fade in (faster)
+                new_intensity = current_intensity + (target_intensity - current_intensity) * self.glow_fade_speed * 2
+            else:
+                # Fade out (slower for nice decay)
+                new_intensity = current_intensity + (target_intensity - current_intensity) * self.glow_fade_speed
+            self.glow_intensity[channel_idx] = new_intensity
+
+            # Draw gradient if there's any glow
+            if new_intensity > 0.01:
+                center_alpha = 0.18 * new_intensity
+                edge_alpha = 0.0
+
+                # Top half: gradient from top (transparent) to center (colored)
+                top_color = imgui.get_color_u32(ImVec4(color.x, color.y, color.z, edge_alpha))
+                center_color_u32 = imgui.get_color_u32(ImVec4(color.x, color.y, color.z, center_alpha))
+                mid_y = plot_pos.y + plot_size.y / 2
+
+                draw_list.add_rect_filled_multi_color(
+                    imgui.ImVec2(plot_pos.x, plot_pos.y),
+                    imgui.ImVec2(plot_pos.x + plot_size.x, mid_y),
+                    top_color, top_color,  # top-left, top-right
+                    center_color_u32, center_color_u32  # bottom-right, bottom-left
+                )
+
+                # Bottom half: gradient from center (colored) to bottom (transparent)
+                draw_list.add_rect_filled_multi_color(
+                    imgui.ImVec2(plot_pos.x, mid_y),
+                    imgui.ImVec2(plot_pos.x + plot_size.x, plot_pos.y + plot_size.y),
+                    center_color_u32, center_color_u32,  # top-left, top-right
+                    top_color, top_color  # bottom-right, bottom-left
+                )
+
+            # Pure white center line
+            center_color = ImVec4(1.0, 1.0, 1.0, 0.3)
+            implot.push_style_color(implot.Col_.line, center_color)
+            implot.push_style_var(implot.StyleVar_.line_weight, 1.0)
+            implot.plot_line(f"{label}_center", np.array([0.0, 1.0], dtype=np.float32),
+                            np.array([0.0, 0.0], dtype=np.float32))
+            implot.pop_style_var()
+            implot.pop_style_color()
+
+            # Draw main waveform - clean thin line
             implot.push_style_color(implot.Col_.line, color)
-            line_weight = 2.0 if is_active else 1.5
+            line_weight = 1.5 if is_active else 1.0
             implot.push_style_var(implot.StyleVar_.line_weight, line_weight)
 
             implot.plot_line(label, x_data, y_data)
@@ -427,16 +508,174 @@ class VisualizerApp:
         draw_list = imgui.get_window_draw_list()
         pos = imgui.get_item_rect_min()
 
+        # Build display label with mode indicator
+        display_label = label
+        if is_dac_active:
+            display_label = f"{label} [DAC]"
+        elif is_noise:
+            display_label = f"{label} [~]"  # Noise indicator
+
         # Label with background for readability
         label_color = imgui.get_color_u32(color) if is_active else imgui.get_color_u32(self.COLORS['text_dim'])
         bg_color = imgui.get_color_u32(ImVec4(0.0, 0.0, 0.0, 0.5))
-        text_size = imgui.calc_text_size(label)
+        text_size = imgui.calc_text_size(display_label)
         draw_list.add_rect_filled(
             imgui.ImVec2(pos.x + 4, pos.y + 2),
             imgui.ImVec2(pos.x + text_size.x + 12, pos.y + text_size.y + 6),
             bg_color, 3.0
         )
-        draw_list.add_text(imgui.ImVec2(pos.x + 8, pos.y + 4), label_color, label)
+        draw_list.add_text(imgui.ImVec2(pos.x + 8, pos.y + 4), label_color, display_label)
+
+    def _draw_keyboard(self, x: float, y: float, width: float, height: float):
+        """Draw a vertical piano keyboard with floating pitch indicators."""
+        draw_list = imgui.get_window_draw_list()
+
+        # White keys per octave: C, D, E, F, G, A, B (indices 0-6)
+        # Map MIDI note to which white key it is or sits between
+        # Note in octave -> white key index (0-6), or boundary position for black keys
+        white_key_indices = {0: 0, 2: 1, 4: 2, 5: 3, 7: 4, 9: 5, 11: 6}  # C,D,E,F,G,A,B
+
+        # Black keys sit at boundaries: C#=between 0&1, D#=between 1&2, F#=between 3&4, G#=between 4&5, A#=between 5&6
+        black_key_boundary = {1: 1, 3: 2, 6: 4, 8: 5, 10: 6}  # note_in_octave -> boundary position
+
+        # Count white keys in range
+        num_white_keys = 0
+        for n in range(self.keyboard_low_note, self.keyboard_high_note + 1):
+            if (n % 12) in white_key_indices:
+                num_white_keys += 1
+
+        pixels_per_white_key = height / num_white_keys
+
+        # Colors
+        white_key_color = imgui.get_color_u32(ImVec4(0.92, 0.92, 0.94, 1.0))
+        black_key_color = imgui.get_color_u32(ImVec4(0.1, 0.1, 0.12, 1.0))
+        key_border = imgui.get_color_u32(ImVec4(0.5, 0.5, 0.55, 0.6))
+
+        # Black keys are 55% the length of white keys
+        black_key_length = width * 0.55
+
+        # Build a mapping from MIDI note to Y position (center of key or boundary)
+        def midi_to_y(midi_note_float):
+            """Convert MIDI note (can be fractional) to Y position."""
+            midi_note = int(midi_note_float)
+            frac = midi_note_float - midi_note
+
+            # Count white keys from low note to this note
+            white_key_count = 0
+            for n in range(self.keyboard_low_note, min(midi_note, self.keyboard_high_note) + 1):
+                if (n % 12) in white_key_indices:
+                    white_key_count += 1
+
+            note_in_octave = midi_note % 12
+
+            if note_in_octave in white_key_indices:
+                # White key - position at center of this white key
+                # white_key_count is 1-based (includes this key), so center is at (count - 0.5)
+                pos = white_key_count - 0.5
+            else:
+                # Black key - position at boundary between white keys
+                # The boundary is at the white_key_count (after the previous white key)
+                pos = white_key_count
+
+            # Handle fractional notes (pitch bends)
+            if frac > 0 and midi_note < self.keyboard_high_note:
+                next_y = midi_to_y(midi_note + 1)
+                curr_y = y + (num_white_keys - pos) * pixels_per_white_key
+                return curr_y + frac * (next_y - curr_y)
+
+            # Y from top (high notes at top, low at bottom)
+            return y + (num_white_keys - pos) * pixels_per_white_key
+
+        # Draw white key background
+        draw_list.add_rect_filled(
+            imgui.ImVec2(x, y),
+            imgui.ImVec2(x + width, y + height),
+            white_key_color
+        )
+
+        # Draw borders between white keys
+        white_key_count = 0
+        for midi_note in range(self.keyboard_low_note, self.keyboard_high_note + 1):
+            note_in_octave = midi_note % 12
+            if note_in_octave in white_key_indices:
+                white_key_count += 1
+                # Draw border at bottom of this white key (except for the last one)
+                if midi_note < self.keyboard_high_note:
+                    border_y = y + (num_white_keys - white_key_count) * pixels_per_white_key
+                    draw_list.add_line(
+                        imgui.ImVec2(x, border_y),
+                        imgui.ImVec2(x + width, border_y),
+                        key_border, 1.0
+                    )
+
+        # Draw black keys on top
+        for midi_note in range(self.keyboard_low_note, self.keyboard_high_note + 1):
+            note_in_octave = midi_note % 12
+            if note_in_octave in black_key_boundary:
+                key_y = midi_to_y(midi_note)
+                black_height = pixels_per_white_key * 0.65
+
+                draw_list.add_rect_filled(
+                    imgui.ImVec2(x, key_y - black_height / 2),
+                    imgui.ImVec2(x + black_key_length, key_y + black_height / 2),
+                    black_key_color
+                )
+
+        # Draw floating pitch indicators for active channels with glow transitions
+        for ch in range(self.TOTAL_CHANNELS - 1):  # Exclude noise
+            pitch = self.channel_pitch[ch]
+            is_active = pitch > 0 and self.key_on[ch] and self.keyboard_low_note <= pitch <= self.keyboard_high_note
+
+            # Smooth glow transition (glow only, not the indicator itself)
+            target_glow = 1.0 if is_active else 0.0
+            current_glow = self.indicator_glow[ch]
+            if target_glow > current_glow:
+                new_glow = current_glow + (target_glow - current_glow) * 0.3
+            else:
+                new_glow = current_glow + (target_glow - current_glow) * 0.08
+            self.indicator_glow[ch] = new_glow
+
+            # Draw glow even when fading out (as long as there's some glow left)
+            if new_glow > 0.01 and pitch > 0 and self.keyboard_low_note <= pitch <= self.keyboard_high_note:
+                indicator_y = midi_to_y(pitch)
+                color = self.channel_colors[ch]
+
+                # Outer glow (larger, more visible)
+                outer_glow_alpha = 0.35 * new_glow
+                outer_glow_color = imgui.get_color_u32(ImVec4(color.x, color.y, color.z, outer_glow_alpha))
+                draw_list.add_rect_filled(
+                    imgui.ImVec2(x, indicator_y - 10),
+                    imgui.ImVec2(x + width, indicator_y + 10),
+                    outer_glow_color
+                )
+
+                # Inner glow trail (brighter)
+                inner_glow_alpha = 0.6 * new_glow
+                glow_color = imgui.get_color_u32(ImVec4(color.x, color.y, color.z, inner_glow_alpha))
+                draw_list.add_rect_filled(
+                    imgui.ImVec2(x, indicator_y - 4),
+                    imgui.ImVec2(x + width, indicator_y + 4),
+                    glow_color
+                )
+
+            # Draw indicator line and circle only when active (instant on/off)
+            if is_active:
+                indicator_y = midi_to_y(pitch)
+                color = self.channel_colors[ch]
+
+                # Draw main indicator line (full opacity)
+                line_color = imgui.get_color_u32(ImVec4(color.x, color.y, color.z, 1.0))
+                draw_list.add_line(
+                    imgui.ImVec2(x, indicator_y),
+                    imgui.ImVec2(x + width, indicator_y),
+                    line_color, 2.0
+                )
+
+                # Draw bigger circle at the indicator
+                draw_list.add_circle_filled(
+                    imgui.ImVec2(x + width - 6, indicator_y),
+                    6.0, line_color
+                )
 
     def gui(self):
         """Main GUI rendering function - called every frame."""
@@ -447,8 +686,10 @@ class VisualizerApp:
         # Calculate layout
         padding = 10
         status_height = 60
+        keyboard_width = 50  # Width of piano keyboard on left
+
         available_height = window_size.y - status_height - padding * 2
-        available_width = window_size.x - padding * 2
+        available_width = window_size.x - padding * 2 - keyboard_width - padding
 
         # FM channels: 2 columns x 3 rows
         # PSG channels: 4 columns x 1 row
@@ -474,12 +715,25 @@ class VisualizerApp:
         imgui.begin("Visualizer", None, window_flags)
 
         # Status bar at top
-        self._draw_status_bar(available_width)
+        self._draw_status_bar(available_width + keyboard_width + padding)
 
         imgui.dummy(imgui.ImVec2(0, padding))
 
+        # Draw keyboard on left side
+        keyboard_y = imgui.get_cursor_screen_pos().y
+        self._draw_keyboard(
+            padding,
+            keyboard_y,
+            keyboard_width,
+            available_height - padding
+        )
+
+        # Offset content to the right of keyboard
+        imgui.set_cursor_pos(imgui.ImVec2(keyboard_width + padding * 2, imgui.get_cursor_pos().y))
+
         # FM Channels (2x3 grid)
         for row in range(fm_rows):
+            imgui.set_cursor_pos_x(keyboard_width + padding * 2)
             for col in range(fm_cols):
                 channel_idx = row * fm_cols + col
                 if channel_idx < self.FM_CHANNELS:
@@ -495,6 +749,7 @@ class VisualizerApp:
         imgui.dummy(imgui.ImVec2(0, padding))
 
         # PSG Channels (1x4 row)
+        imgui.set_cursor_pos_x(keyboard_width + padding * 2)
         for i in range(psg_cols):
             channel_idx = self.FM_CHANNELS + i
             if i > 0:

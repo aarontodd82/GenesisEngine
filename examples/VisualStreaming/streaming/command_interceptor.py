@@ -73,9 +73,27 @@ class CommandInterceptor:
         # Key-on callback
         self.on_key_change: Optional[Callable[[int, bool], None]] = None
 
+        # DAC mode callback (called when DAC is enabled/disabled)
+        self.on_dac_mode_change: Optional[Callable[[bool], None]] = None
+
+        # Pitch change callback (channel, fractional_midi_pitch)
+        self.on_pitch_change: Optional[Callable[[int, float], None]] = None
+
+        # DAC mode state (FM channel 6 becomes DAC output)
+        self._dac_enabled = False
+
         # Sample buffers for each channel (accumulate before sending)
         self._fm_buffers = [[] for _ in range(6)]
         self._psg_buffers = [[] for _ in range(4)]
+
+        # FM frequency tracking (fnum, block per channel)
+        self._fm_fnum = [0] * 6
+        self._fm_block = [0] * 6
+
+        # PSG frequency tracking (10-bit tone value per channel)
+        self._psg_tone = [0] * 3
+        self._psg_latch_channel = 0
+        self._psg_latch_is_volume = False
 
         # Running state
         self._running = False
@@ -87,6 +105,7 @@ class CommandInterceptor:
         self.sn76489.reset()
         self._fm_buffers = [[] for _ in range(6)]
         self._psg_buffers = [[] for _ in range(4)]
+        self._dac_enabled = False
 
     def stop(self):
         """Stop the interceptor."""
@@ -213,8 +232,11 @@ class CommandInterceptor:
                 self._generate_samples(total_samples)
 
     def _apply_psg_write(self, value: int):
-        """Apply a PSG write and check for key changes."""
+        """Apply a PSG write and check for key/frequency changes."""
         self.sn76489.write(value)
+
+        # Track frequency changes
+        self._check_psg_frequency(value)
 
         # Check for key changes (attenuation commands)
         if value & 0x80 and value & 0x10:  # Attenuation latch
@@ -225,9 +247,11 @@ class CommandInterceptor:
                 self.on_key_change(6 + channel, is_on)
 
     def _apply_ym_write(self, port: int, addr: int, data: int):
-        """Apply a YM2612 write and check for key changes."""
+        """Apply a YM2612 write and check for key/DAC/frequency changes."""
         self.ym2612.write(port, addr, data)
         self._check_ym_key_change(addr, data)
+        self._check_dac_change(port, addr, data)
+        self._check_fm_frequency(port, addr, data)
 
     def _generate_samples(self, num_samples: int):
         """Generate samples and buffer them for visualization."""
@@ -289,6 +313,92 @@ class CommandInterceptor:
                 key_on = (data & 0xF0) != 0
                 if self.on_key_change:
                     self.on_key_change(channel, key_on)
+
+    def _check_dac_change(self, port: int, addr: int, data: int):
+        """Check for DAC enable/disable in YM2612 writes."""
+        # Register 0x2B on port 0 controls DAC enable (bit 7)
+        if port == 0 and addr == 0x2B:
+            new_dac_state = bool(data & 0x80)
+            if new_dac_state != self._dac_enabled:
+                self._dac_enabled = new_dac_state
+                if self.on_dac_mode_change:
+                    self.on_dac_mode_change(new_dac_state)
+
+    def _check_fm_frequency(self, port: int, addr: int, data: int):
+        """Track FM frequency changes and send pitch updates."""
+        # Frequency registers: A0-A2 (low byte), A4-A6 (high byte + block)
+        # Port 0 = channels 0-2, Port 1 = channels 3-5
+        base_ch = 0 if port == 0 else 3
+
+        if 0xA0 <= addr <= 0xA2:
+            # Low byte of fnum
+            ch = base_ch + (addr - 0xA0)
+            self._fm_fnum[ch] = (self._fm_fnum[ch] & 0x700) | data
+            self._update_fm_pitch(ch)
+        elif 0xA4 <= addr <= 0xA6:
+            # High byte of fnum + block
+            ch = base_ch + (addr - 0xA4)
+            self._fm_fnum[ch] = (self._fm_fnum[ch] & 0xFF) | ((data & 0x07) << 8)
+            self._fm_block[ch] = (data >> 3) & 0x07
+            self._update_fm_pitch(ch)
+
+    def _update_fm_pitch(self, channel: int):
+        """Calculate fractional MIDI pitch from FM fnum/block and send update."""
+        import math
+        fnum = self._fm_fnum[channel]
+        block = self._fm_block[channel]
+
+        if fnum == 0:
+            return
+
+        # YM2612 frequency: F = (fnum * 7670453) / (144 * 2^(21-block))
+        freq = fnum * 0.02548 * (1 << block)
+
+        # Convert to fractional MIDI pitch: MIDI = 69 + 12 * log2(freq / 440)
+        if freq > 20:
+            pitch = 69.0 + 12.0 * math.log2(freq / 440.0)
+            if self.on_pitch_change:
+                self.on_pitch_change(channel, pitch)
+
+    def _check_psg_frequency(self, value: int):
+        """Track PSG frequency changes and send pitch updates."""
+        if value & 0x80:  # Latch byte
+            channel = (value >> 5) & 0x03
+            is_volume = bool(value & 0x10)
+
+            self._psg_latch_channel = channel
+            self._psg_latch_is_volume = is_volume
+
+            if not is_volume and channel < 3:  # Tone register, not noise
+                # Low 4 bits of frequency
+                self._psg_tone[channel] = (self._psg_tone[channel] & 0x3F0) | (value & 0x0F)
+                self._update_psg_pitch(channel)
+        else:  # Data byte (high bits)
+            if self._psg_latch_channel < 3 and not self._psg_latch_is_volume:
+                self._psg_tone[self._psg_latch_channel] = \
+                    (self._psg_tone[self._psg_latch_channel] & 0x00F) | ((value & 0x3F) << 4)
+                self._update_psg_pitch(self._psg_latch_channel)
+
+    def _update_psg_pitch(self, channel: int):
+        """Calculate fractional MIDI pitch from PSG tone value and send update."""
+        import math
+        tone = self._psg_tone[channel]
+
+        if tone == 0:
+            return
+
+        # PSG frequency: F = 3579545 / (32 * tone)
+        freq = 3579545.0 / (32.0 * tone)
+
+        # Convert to fractional MIDI pitch
+        if freq > 20:
+            pitch = 69.0 + 12.0 * math.log2(freq / 440.0)
+            if self.on_pitch_change:
+                self.on_pitch_change(6 + channel, pitch)  # PSG channels are 6-8
+
+    def is_dac_enabled(self) -> bool:
+        """Check if DAC mode is currently enabled."""
+        return self._dac_enabled
 
     def get_channel_active(self, channel: int) -> bool:
         """Check if a channel is currently active."""

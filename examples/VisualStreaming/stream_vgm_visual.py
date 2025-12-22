@@ -1095,6 +1095,8 @@ class VisualStreamer:
         # Connect interceptor callbacks to visualizer
         self.interceptor.on_waveform_update = self.app.update_waveform
         self.interceptor.on_key_change = self.app.set_key_on
+        self.interceptor.on_dac_mode_change = self.app.set_dac_mode
+        self.interceptor.on_pitch_change = self.app.set_channel_pitch
 
         # Set up file info
         filename = os.path.basename(vgm_path)
@@ -1562,6 +1564,8 @@ def run_offline_visualizer(vgm_path, loop_count=None):
     interceptor = CommandInterceptor()
     interceptor.on_waveform_update = app.update_waveform
     interceptor.on_key_change = app.set_key_on
+    interceptor.on_dac_mode_change = app.set_dac_mode
+    interceptor.on_pitch_change = app.set_channel_pitch
 
     filename = os.path.basename(vgm_path)
     app.set_playback_info(filename, total_duration)
