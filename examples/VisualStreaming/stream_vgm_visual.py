@@ -40,8 +40,13 @@ sys.path.insert(0, _script_dir)
 
 # Visualization imports (optional - falls back to CLI mode if unavailable)
 _HAS_VISUALIZATION = False
+_USE_PYGAME = True  # Set to False to use imgui version
+
 try:
-    from visualizer.app import VisualizerApp
+    if _USE_PYGAME:
+        from visualizer.app_pygame import VisualizerApp
+    else:
+        from visualizer.app import VisualizerApp
     from streaming.command_interceptor import CommandInterceptor
     _HAS_VISUALIZATION = True
 except ImportError as e:
