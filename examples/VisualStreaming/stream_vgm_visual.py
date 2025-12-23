@@ -1306,15 +1306,9 @@ class VisualStreamer:
             target_samples = int(elapsed * 44100.0)
             drift_samples = target_samples - samples_processed
 
-            if drift_samples > 441:  # More than 10ms behind - skip ahead
-                new_idx = find_cmd_for_time(target_samples)
-                if new_idx > cmd_idx:
-                    cmd_idx = new_idx
-                    samples_processed = cmd_sample_times[cmd_idx] if cmd_idx < len(cmd_sample_times) else total_samples
-                    continue
-            elif drift_samples < -441:  # More than 10ms ahead - wait
-                time.sleep((-drift_samples) / 44100.0)
-                continue
+            # If behind, fast-forward by processing commands without sleeping
+            # (don't skip - we need to process through interceptor for emulator state)
+            catching_up = drift_samples > 441  # More than 10ms behind
 
             cmd, args = self.commands[cmd_idx]
             cmd_idx += 1
@@ -1349,13 +1343,12 @@ class VisualStreamer:
 
             if wait_samples > 0:
                 samples_processed += wait_samples
-                # Calculate target time using loop-adjusted elapsed
-                target_time = self.start_time + loop_time_offset + (samples_processed / 44100.0)
-                now = time.time()
-
-                if now < target_time:
-                    # We're ahead - wait until target time
-                    time.sleep(target_time - now)
+                # Skip sleep if catching up, otherwise sync to wall clock
+                if not catching_up:
+                    target_time = self.start_time + loop_time_offset + (samples_processed / 44100.0)
+                    now = time.time()
+                    if now < target_time:
+                        time.sleep(target_time - now)
 
     def _on_progress(self, progress: float, elapsed: float, total: float):
         """Called to update progress."""

@@ -181,11 +181,16 @@ class VisualizerApp:
 
         self._lock = threading.Lock()
         self.valid_samples = [0] * self.TOTAL_CHANNELS
-        self.display_samples = 256
+        self.default_display_samples = 256  # Normal window - shows frequency changes
+        self.max_display_samples = 1024  # Cap for very low frequencies
         self.scroll_display_samples = 4096  # ~93ms at 44.1kHz - human-perceivable scroll rate
 
+        # Per-channel adaptive display samples (only expands for low frequencies)
+        self.channel_display_samples = [self.default_display_samples] * self.TOTAL_CHANNELS
+        self.channel_period = [128.0] * self.TOTAL_CHANNELS  # Smoothed period estimate
+
         # Trigger state
-        self.trigger_offset = [self.display_samples + 50] * self.TOTAL_CHANNELS
+        self.trigger_offset = [self.default_display_samples + 50] * self.TOTAL_CHANNELS
         self.samples_since_last_frame = [0] * self.TOTAL_CHANNELS
         self.smoothed_period = [20.0] * self.TOTAL_CHANNELS
         self.triggered_display = True  # Use zero-crossing trigger
@@ -260,6 +265,28 @@ class VisualizerApp:
 
     def set_progress(self, progress: float, elapsed: float):
         self.elapsed_time = elapsed
+
+    def _get_display_samples_for_channel(self, channel_idx: int) -> int:
+        """
+        Get display samples for a channel based on its pitch.
+        Uses default window, but expands for low frequencies where a full cycle won't fit.
+        """
+        midi_note = self.channel_pitch[channel_idx]
+        if midi_note <= 0:
+            return self.default_display_samples
+
+        # Convert MIDI note to frequency: freq = 440 * 2^((note - 69) / 12)
+        freq = 440.0 * (2.0 ** ((midi_note - 69.0) / 12.0))
+        # Period in samples at 44100 Hz
+        period = 44100.0 / freq
+
+        # If period fits in default window, use default (preserves frequency visualization)
+        if period <= self.default_display_samples * 0.9:
+            return self.default_display_samples
+
+        # For low frequencies, expand to show ~1.5 cycles
+        expanded = int(period * 1.5)
+        return min(expanded, self.max_display_samples)
 
     def _find_trigger(self, channel_idx: int, data: np.ndarray, display_samples: int, samples_advanced: int) -> int:
         """
@@ -693,7 +720,11 @@ class VisualizerApp:
         is_noise = (channel_idx == 9)
         is_dac_active = (channel_idx == 5 and self.dac_enabled)
         use_scrolling = is_noise or is_dac_active
-        display_samples = self.scroll_display_samples if use_scrolling else self.display_samples
+        # Adaptive display: scrolling for noise/DAC, pitch-based for tonal channels
+        if use_scrolling:
+            display_samples = self.scroll_display_samples
+        else:
+            display_samples = self._get_display_samples_for_channel(channel_idx)
 
         # Get display data - use triggered display for tonal channels (same as app.py)
         if self.triggered_display and not use_scrolling:
