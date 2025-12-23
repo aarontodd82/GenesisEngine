@@ -1215,12 +1215,9 @@ class VisualStreamer:
 
     def _on_stream_start(self):
         """Called when hardware streaming actually starts - launch visualization."""
-        # Set start time with offset to compensate for hardware buffer delay
-        # and emulator CPU overhead.
-        # The hardware buffers chunks before playback starts, and the emulator
-        # takes CPU time to generate samples. Both cause viz to lag behind audio.
-        SYNC_OFFSET = 0.20  # 200ms to compensate for buffer + CPU overhead
-        self.start_time = time.time() - SYNC_OFFSET
+        # Start time for wall-clock sync. The 25ms catch-up mechanism handles
+        # any drift from hardware buffering or CPU overhead.
+        self.start_time = time.time()
         # Then start viz thread which will use this start_time
         self.viz_thread = threading.Thread(target=self._viz_thread_run, daemon=True)
         self.viz_thread.start()
@@ -1303,19 +1300,21 @@ class VisualStreamer:
                         continue
                 break
 
-            # Check if we're behind BEFORE processing
+            # Bidirectional sync: skip ahead if behind, wait if ahead
             now = time.time()
             elapsed = now - self.start_time - loop_time_offset
             target_samples = int(elapsed * 44100.0)
             drift_samples = target_samples - samples_processed
 
-            if drift_samples > 1102:  # More than 25ms behind
-                # Skip ahead to catch up
+            if drift_samples > 441:  # More than 10ms behind - skip ahead
                 new_idx = find_cmd_for_time(target_samples)
                 if new_idx > cmd_idx:
                     cmd_idx = new_idx
                     samples_processed = cmd_sample_times[cmd_idx] if cmd_idx < len(cmd_sample_times) else total_samples
                     continue
+            elif drift_samples < -441:  # More than 10ms ahead - wait
+                time.sleep((-drift_samples) / 44100.0)
+                continue
 
             cmd, args = self.commands[cmd_idx]
             cmd_idx += 1
