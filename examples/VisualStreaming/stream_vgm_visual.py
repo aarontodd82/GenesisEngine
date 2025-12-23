@@ -1094,12 +1094,11 @@ class VisualStreamer:
     """
     Manages streaming with visualization.
 
-    PARALLEL REAL-TIME DESIGN:
-    - Streaming thread: sends data to hardware as fast as allowed
-    - Visualization thread: processes commands at real-time rate on its own clock
-
-    Both start at the same time, so they stay synchronized.
-    The visualization is NOT tied to when chunks are sent - it runs on wall-clock time.
+    SYNCHRONIZED DESIGN:
+    - Streaming thread: sends chunks to hardware
+    - Visualization thread: processes SAME preprocessed commands at real-time rate
+    - Both use the same command data, started at the same time
+    - If viz falls behind wall-clock, it skips waits to catch up
     """
 
     def __init__(self):
@@ -1110,8 +1109,9 @@ class VisualStreamer:
         self.stop_event = threading.Event()
         self.stream_result = None
         self.commands = None  # Preprocessed commands for visualization
-        self.start_time = None  # When playback started
+        self.loop_index = None  # Loop point in commands
         self.loop_count = None  # Looping: None=no loop, 0=infinite, N=N times
+        self.start_time = None  # When playback started (shared between threads)
 
     def stream_with_visualization(self, port, baud, vgm_path, dac_rate=None,
                                    no_dac=False, loop_count=None):
@@ -1180,7 +1180,13 @@ class VisualStreamer:
         # Preprocess same as streaming
         commands, loop_index = preprocess_vgm(data, header['data_offset'], header['loop_offset'])
 
+        # Detect chips and apply PSG attenuation (same as streaming)
+        has_psg, has_ym2612 = detect_chips(commands)
+        if has_psg and has_ym2612:
+            commands, loop_index = attenuate_psg(commands, attenuation_increase=2, loop_index=loop_index)
+
         # Apply same DAC processing as streaming would
+        # Note: We don't know board type here, so use provided dac_rate or assume 1
         if no_dac:
             commands, loop_index = strip_dac(commands, loop_index)
         elif dac_rate and dac_rate > 1:
@@ -1197,11 +1203,11 @@ class VisualStreamer:
         try:
             self.stream_result = stream_vgm_visual_internal(
                 port, baud, vgm_path, dac_rate, no_dac, loop_count,
-                chunk_callback=None,  # Don't process chunks in streaming thread
+                chunk_callback=None,
                 progress_callback=self._on_progress,
                 status_callback=self._on_status,
                 stop_event=self.stop_event,
-                start_callback=self._on_stream_start  # NEW: called when streaming actually starts
+                start_callback=self._on_stream_start
             )
         except Exception as e:
             print(f"Streaming error: {e}")
@@ -1209,49 +1215,115 @@ class VisualStreamer:
 
     def _on_stream_start(self):
         """Called when hardware streaming actually starts - launch visualization."""
-        self.start_time = time.time()
+        # Set start time with offset to compensate for hardware buffer delay
+        # and emulator CPU overhead.
+        # The hardware buffers chunks before playback starts, and the emulator
+        # takes CPU time to generate samples. Both cause viz to lag behind audio.
+        SYNC_OFFSET = 0.20  # 200ms to compensate for buffer + CPU overhead
+        self.start_time = time.time() - SYNC_OFFSET
+        # Then start viz thread which will use this start_time
         self.viz_thread = threading.Thread(target=self._viz_thread_run, daemon=True)
         self.viz_thread.start()
 
     def _viz_thread_run(self):
-        """Visualization thread - runs at real-time rate on wall clock."""
+        """
+        Visualization thread - processes commands at real-time rate.
+
+        Uses the SAME preprocessed commands as streaming.
+        Timing is based on wall-clock from shared start_time.
+        If behind, skips commands (not just waits) to truly catch up.
+        """
         if not self.commands:
             return
 
         cmd_idx = 0
         samples_processed = 0
 
-        # Looping logic matching audio streaming:
-        # loop_count: None = no looping, 0 = infinite, N = play N times total
+        # Looping state
         is_looping = self.loop_count is not None
         plays_remaining = -1 if self.loop_count == 0 else (self.loop_count or 1)
-
-        # Loop start index (use loop_index if available, else 0)
         loop_start_idx = self.loop_index if self.loop_index is not None else 0
+
+        # Pre-calculate cumulative sample times for each command for fast seeking
+        cmd_sample_times = []
+        cumulative = 0
+        for cmd, args in self.commands:
+            cmd_sample_times.append(cumulative)
+            if cmd == CMD_WAIT_NTSC:
+                cumulative += FRAME_SAMPLES_NTSC
+            elif cmd == CMD_WAIT_PAL:
+                cumulative += FRAME_SAMPLES_PAL
+            elif cmd == CMD_WAIT_FRAMES and len(args) >= 2:
+                cumulative += args[0] | (args[1] << 8)
+            elif 0x70 <= cmd <= 0x7F:
+                cumulative += (cmd & 0x0F) + 1
+            elif 0x80 <= cmd <= 0x8F:
+                cumulative += cmd & 0x0F
+            elif cmd == CMD_RLE_WAIT_FRAME_1 and args:
+                cumulative += args[0] * FRAME_SAMPLES_NTSC
+        total_samples = cumulative
+        loop_start_samples = cmd_sample_times[loop_start_idx] if loop_start_idx < len(cmd_sample_times) else 0
+
+        def find_cmd_for_time(target_samples):
+            """Binary search to find command index for a given sample time."""
+            lo, hi = 0, len(cmd_sample_times) - 1
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                if cmd_sample_times[mid] <= target_samples:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            return lo
+
+        # Use a local time reference that resets on loop
+        loop_time_offset = 0.0  # Added to start_time for current loop iteration
+
+        def do_loop():
+            """Handle loop - reset to loop point and adjust time reference."""
+            nonlocal cmd_idx, samples_processed, loop_time_offset
+            # Calculate how far into the song we should be at loop point
+            loop_point_time = loop_start_samples / 44100.0
+            # Current wall time
+            now = time.time()
+            # Adjust offset so (now - start_time - loop_time_offset) = loop_point_time
+            loop_time_offset = (now - self.start_time) - loop_point_time
+            cmd_idx = loop_start_idx
+            samples_processed = loop_start_samples
 
         while not self.stop_event.is_set():
             # Check if we've reached the end of commands
             if cmd_idx >= len(self.commands):
                 if is_looping:
                     if plays_remaining == -1:
-                        cmd_idx = loop_start_idx
+                        do_loop()
                         continue
                     elif plays_remaining > 1:
                         plays_remaining -= 1
-                        cmd_idx = loop_start_idx
+                        do_loop()
                         continue
-                    else:
-                        break
-                else:
-                    break
+                break
+
+            # Check if we're behind BEFORE processing
+            now = time.time()
+            elapsed = now - self.start_time - loop_time_offset
+            target_samples = int(elapsed * 44100.0)
+            drift_samples = target_samples - samples_processed
+
+            if drift_samples > 1102:  # More than 25ms behind
+                # Skip ahead to catch up
+                new_idx = find_cmd_for_time(target_samples)
+                if new_idx > cmd_idx:
+                    cmd_idx = new_idx
+                    samples_processed = cmd_sample_times[cmd_idx] if cmd_idx < len(cmd_sample_times) else total_samples
+                    continue
 
             cmd, args = self.commands[cmd_idx]
             cmd_idx += 1
 
-            # Process command
+            # Process command through interceptor
             self.interceptor.process_command(cmd, args)
 
-            # Calculate samples for this command
+            # Calculate wait samples for this command
             wait_samples = 0
             if cmd == CMD_WAIT_NTSC:
                 wait_samples = FRAME_SAMPLES_NTSC
@@ -1268,21 +1340,22 @@ class VisualStreamer:
             elif cmd == CMD_END_OF_STREAM:
                 if is_looping:
                     if plays_remaining == -1:
-                        cmd_idx = loop_start_idx
+                        do_loop()
                         continue
                     elif plays_remaining > 1:
                         plays_remaining -= 1
-                        cmd_idx = loop_start_idx
+                        do_loop()
                         continue
                 break
 
             if wait_samples > 0:
                 samples_processed += wait_samples
-
-                # Wait until real-time catches up
-                target_time = self.start_time + (samples_processed / 44100.0)
+                # Calculate target time using loop-adjusted elapsed
+                target_time = self.start_time + loop_time_offset + (samples_processed / 44100.0)
                 now = time.time()
-                if target_time > now:
+
+                if now < target_time:
+                    # We're ahead - wait until target time
                     time.sleep(target_time - now)
 
     def _on_progress(self, progress: float, elapsed: float, total: float):
