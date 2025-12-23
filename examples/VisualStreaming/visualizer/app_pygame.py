@@ -156,7 +156,10 @@ class VisualizerApp:
         'dim': (0.5, 0.5, 0.6, 1.0),
     }
 
-    def __init__(self):
+    def __init__(self, crt_enabled: bool = True):
+        # CRT shader toggle (on by default)
+        self.crt_enabled = crt_enabled
+
         # Waveform data
         self.waveforms = [np.zeros(self.WAVEFORM_SAMPLES, dtype=np.float32)
                           for _ in range(self.TOTAL_CHANNELS)]
@@ -1128,8 +1131,11 @@ class VisualizerApp:
         vp_x, vp_y, vp_w, vp_h = self.viewport
         glViewport(vp_x, vp_y, vp_w, vp_h)
 
-        if self.crt_shader is None:
-            # Fallback: just copy framebuffer to screen without shader
+        # Choose shader: CRT effects or passthrough (zoom shader is a passthrough)
+        shader = self.crt_shader if self.crt_enabled else self.zoom_shader
+        if shader is None:
+            # Fallback if no shader available
+            glActiveTexture(GL_TEXTURE0)
             glEnable(GL_TEXTURE_2D)
             glBindTexture(GL_TEXTURE_2D, self.fb_texture2)
             glColor4f(1, 1, 1, 1)
@@ -1142,16 +1148,20 @@ class VisualizerApp:
             glDisable(GL_TEXTURE_2D)
             return
 
-        glUseProgram(self.crt_shader)
+        glUseProgram(shader)
 
-        # Set uniforms - use internal render size for shader effects
-        glUniform1f(glGetUniformLocation(self.crt_shader, "time"), pygame.time.get_ticks() / 1000.0)
-        glUniform2f(glGetUniformLocation(self.crt_shader, "resolution"), float(self.width), float(self.height))
+        # Set uniforms based on which shader we're using
+        if self.crt_enabled:
+            glUniform1f(glGetUniformLocation(shader, "time"), pygame.time.get_ticks() / 1000.0)
+            glUniform2f(glGetUniformLocation(shader, "resolution"), float(self.width), float(self.height))
+        else:
+            # Zoom shader just needs pulseIntensity (set to 0 for no effect)
+            glUniform1f(glGetUniformLocation(shader, "pulseIntensity"), 0.0)
 
         # Bind zoomed framebuffer texture
         glActiveTexture(GL_TEXTURE0)
         glBindTexture(GL_TEXTURE_2D, self.fb_texture2)
-        glUniform1i(glGetUniformLocation(self.crt_shader, "screenTexture"), 0)
+        glUniform1i(glGetUniformLocation(shader, "screenTexture"), 0)
 
         # Draw fullscreen quad (viewport handles letterboxing)
         glBegin(GL_QUADS)

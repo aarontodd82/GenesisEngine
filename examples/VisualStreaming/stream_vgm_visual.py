@@ -1114,14 +1114,14 @@ class VisualStreamer:
         self.start_time = None  # When playback started (shared between threads)
 
     def stream_with_visualization(self, port, baud, vgm_path, dac_rate=None,
-                                   no_dac=False, loop_count=None):
+                                   no_dac=False, loop_count=None, crt_enabled=True):
         """Stream VGM with visualization."""
 
         # Store loop setting for viz thread
         self.loop_count = loop_count
 
         # Create visualizer app
-        self.app = VisualizerApp()
+        self.app = VisualizerApp(crt_enabled=crt_enabled)
 
         # Create command interceptor
         self.interceptor = CommandInterceptor()
@@ -1655,17 +1655,17 @@ def stream_vgm_visual_internal(port, baud, vgm_path, dac_rate=None, no_dac=False
         return False
 
 
-def run_visual_streamer(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=None):
+def run_visual_streamer(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=None, crt_enabled=True):
     """Run the visual streamer."""
     if not _HAS_VISUALIZATION:
         print("Visualization not available. Running CLI mode.")
         return stream_vgm(port, baud, vgm_path, dac_rate, no_dac, loop_count)
 
     streamer = VisualStreamer()
-    return streamer.stream_with_visualization(port, baud, vgm_path, dac_rate, no_dac, loop_count)
+    return streamer.stream_with_visualization(port, baud, vgm_path, dac_rate, no_dac, loop_count, crt_enabled)
 
 
-def run_offline_visualizer(vgm_path, loop_count=None):
+def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True):
     """Run visualization without hardware - emulator only."""
     if not _HAS_VISUALIZATION:
         print("ERROR: Visualization not available. Install imgui-bundle.")
@@ -1690,7 +1690,7 @@ def run_offline_visualizer(vgm_path, loop_count=None):
     print(f"Commands: {len(commands)}")
 
     # Create visualizer and interceptor
-    app = VisualizerApp()
+    app = VisualizerApp(crt_enabled=crt_enabled)
     interceptor = CommandInterceptor()
     interceptor.on_waveform_update = app.update_waveform
     interceptor.on_key_change = app.set_key_on
@@ -1816,6 +1816,8 @@ Looping:
                         help='Verbose output')
     parser.add_argument('--offline', action='store_true',
                         help='Run visualization without hardware (emulator only)')
+    parser.add_argument('--no-crt', action='store_true',
+                        help='Disable CRT shader effects (scanlines, phosphor, etc.)')
 
     args = parser.parse_args()
 
@@ -1833,7 +1835,7 @@ Looping:
 
     # Offline mode - no hardware needed
     if args.offline:
-        success = run_offline_visualizer(args.file, loop_count=args.loop)
+        success = run_offline_visualizer(args.file, loop_count=args.loop, crt_enabled=not args.no_crt)
         return 0 if success else 1
 
     port = args.port or find_arduino_port()
@@ -1862,7 +1864,8 @@ Looping:
             args.file,
             dac_rate=args.dac_rate,
             no_dac=args.no_dac,
-            loop_count=args.loop
+            loop_count=args.loop,
+            crt_enabled=not args.no_crt
         )
 
     return 0 if success else 1
