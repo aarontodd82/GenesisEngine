@@ -182,7 +182,7 @@ class VisualizerApp:
         self._lock = threading.Lock()
         self.valid_samples = [0] * self.TOTAL_CHANNELS
         self.display_samples = 256
-        self.scroll_display_samples = 512
+        self.scroll_display_samples = 4096  # ~93ms at 44.1kHz - human-perceivable scroll rate
 
         # Trigger state
         self.trigger_offset = [self.display_samples + 50] * self.TOTAL_CHANNELS
@@ -680,6 +680,10 @@ class VisualizerApp:
         color = self.channel_colors[channel_idx]
         is_active = self.key_on[channel_idx]
 
+        # DAC channel is active when DAC is enabled (FM key_on doesn't apply)
+        if channel_idx == 5 and self.dac_enabled:
+            is_active = True
+
         with self._lock:
             full_data = self.waveforms[channel_idx].copy()
             valid_count = self.valid_samples[channel_idx]
@@ -793,11 +797,17 @@ class VisualizerApp:
         if len(y_data) > 1:
             line_color = color if is_active else (color[0] * 0.5, color[1] * 0.5, color[2] * 0.5, 1.0)
             glColor4f(*line_color)
-            # DAC gets thicker line for visibility
-            glLineWidth(3.0 if is_dac_channel else (2.0 if is_active else 1.0))
+            glLineWidth(2.0 if is_active else 1.0)
+
+            # Downsample if needed for performance (target ~256 points for drawing)
+            draw_data = y_data
+            if len(y_data) > 256:
+                step = len(y_data) // 256
+                draw_data = y_data[::step]
+
             glBegin(GL_LINE_STRIP)
-            for i, val in enumerate(y_data):
-                px = x + (i / len(y_data)) * w
+            for i, val in enumerate(draw_data):
+                px = x + (i / len(draw_data)) * w
                 py = center_y - val * (h / 2) * 0.9
                 glVertex2f(px, py)
             glEnd()

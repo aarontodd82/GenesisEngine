@@ -521,19 +521,44 @@ def attenuate_psg(commands, attenuation_increase=1, loop_index=None):
 def commands_to_bytes(commands, loop_index=None):
     """Convert command list to raw bytes.
 
-    Returns: (bytes, loop_byte_offset)
+    Returns: (bytes, loop_byte_offset, byte_to_samples)
         loop_byte_offset is the byte offset where the loop starts, or None.
+        byte_to_samples is a list mapping byte offset to cumulative sample count.
     """
     output = bytearray()
     loop_byte_offset = None
+    byte_to_samples = []  # byte_to_samples[i] = samples elapsed at byte i
+    cumulative_samples = 0
 
     for i, (cmd, args) in enumerate(commands):
         if loop_index is not None and i == loop_index:
             loop_byte_offset = len(output)
+
+        # Record sample count at start of this command
+        start_pos = len(output)
         output.append(cmd)
         output.extend(args)
 
-    return bytes(output), loop_byte_offset
+        # Fill byte_to_samples for all bytes of this command
+        cmd_len = len(output) - start_pos
+        for _ in range(cmd_len):
+            byte_to_samples.append(cumulative_samples)
+
+        # Calculate samples for wait commands (after the command)
+        if cmd == CMD_WAIT_NTSC:
+            cumulative_samples += FRAME_SAMPLES_NTSC
+        elif cmd == CMD_WAIT_PAL:
+            cumulative_samples += FRAME_SAMPLES_PAL
+        elif cmd == CMD_WAIT_FRAMES and len(args) >= 2:
+            cumulative_samples += args[0] | (args[1] << 8)
+        elif 0x70 <= cmd <= 0x7F:
+            cumulative_samples += (cmd & 0x0F) + 1
+        elif 0x80 <= cmd <= 0x8F:
+            cumulative_samples += cmd & 0x0F
+        elif cmd == CMD_RLE_WAIT_FRAME_1 and args:
+            cumulative_samples += args[0] * FRAME_SAMPLES_NTSC
+
+    return bytes(output), loop_byte_offset, byte_to_samples
 
 
 # =============================================================================
@@ -654,7 +679,7 @@ def stream_vgm(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=Non
     print(f"  Wait optimization: {original_cmd_count} -> {len(commands)} commands")
 
     # Convert to bytes
-    stream_data, loop_byte_offset = commands_to_bytes(commands, loop_index)
+    stream_data, loop_byte_offset, _ = commands_to_bytes(commands, loop_index)
     compression_ratio = len(stream_data) / original_bytes * 100 if original_bytes > 0 else 100
     print(f"  Stream size: {len(stream_data):,} bytes ({compression_ratio:.1f}% of original)")
 
@@ -1086,10 +1111,14 @@ class VisualStreamer:
         self.stream_result = None
         self.commands = None  # Preprocessed commands for visualization
         self.start_time = None  # When playback started
+        self.loop_count = None  # Looping: None=no loop, 0=infinite, N=N times
 
     def stream_with_visualization(self, port, baud, vgm_path, dac_rate=None,
                                    no_dac=False, loop_count=None):
         """Stream VGM with visualization."""
+
+        # Store loop setting for viz thread
+        self.loop_count = loop_count
 
         # Create visualizer app
         self.app = VisualizerApp()
@@ -1192,7 +1221,30 @@ class VisualStreamer:
         cmd_idx = 0
         samples_processed = 0
 
-        while not self.stop_event.is_set() and cmd_idx < len(self.commands):
+        # Looping logic matching audio streaming:
+        # loop_count: None = no looping, 0 = infinite, N = play N times total
+        is_looping = self.loop_count is not None
+        plays_remaining = -1 if self.loop_count == 0 else (self.loop_count or 1)
+
+        # Loop start index (use loop_index if available, else 0)
+        loop_start_idx = self.loop_index if self.loop_index is not None else 0
+
+        while not self.stop_event.is_set():
+            # Check if we've reached the end of commands
+            if cmd_idx >= len(self.commands):
+                if is_looping:
+                    if plays_remaining == -1:
+                        cmd_idx = loop_start_idx
+                        continue
+                    elif plays_remaining > 1:
+                        plays_remaining -= 1
+                        cmd_idx = loop_start_idx
+                        continue
+                    else:
+                        break
+                else:
+                    break
+
             cmd, args = self.commands[cmd_idx]
             cmd_idx += 1
 
@@ -1214,6 +1266,14 @@ class VisualStreamer:
             elif cmd == CMD_RLE_WAIT_FRAME_1 and args:
                 wait_samples = args[0] * FRAME_SAMPLES_NTSC
             elif cmd == CMD_END_OF_STREAM:
+                if is_looping:
+                    if plays_remaining == -1:
+                        cmd_idx = loop_start_idx
+                        continue
+                    elif plays_remaining > 1:
+                        plays_remaining -= 1
+                        cmd_idx = loop_start_idx
+                        continue
                 break
 
             if wait_samples > 0:
@@ -1350,7 +1410,7 @@ def stream_vgm_visual_internal(port, baud, vgm_path, dac_rate=None, no_dac=False
     commands, loop_index = apply_wait_optimization(commands, loop_index)
 
     # Convert to bytes
-    stream_data, loop_byte_offset = commands_to_bytes(commands, loop_index)
+    stream_data, loop_byte_offset, byte_to_samples = commands_to_bytes(commands, loop_index)
 
     ser.reset_input_buffer()
 
