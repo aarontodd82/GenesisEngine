@@ -280,7 +280,7 @@ class CommandInterceptor:
             psg_mix = np.zeros(num_samples, dtype=np.float32)
             for ch in range(4):
                 psg_mix += psg_waves[ch]
-            psg_mix *= 0.5  # Scale PSG relative to FM
+            psg_mix *= 0.25  # Scale PSG relative to FM
             stereo[:, 0] += psg_mix
             stereo[:, 1] += psg_mix
             # Soft clip

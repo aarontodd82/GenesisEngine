@@ -42,13 +42,32 @@ public:
         output.clear();
         // rshift=0 for full amplitude, clipmax=32767
         m_fm.output(output, 0, 32767, 1 << channel);
+
+        // Handle DAC for channel 5
+        // DAC data is 9-bit, already sign-converted via XOR 0x80 in register write
+        // Use ymfm's formula to sign-extend: int16_t(m_dac_data << 7) >> 7
+        // This gives range -256 to +255
+        if (channel == 5 && m_dac_enable) {
+            int16_t dac_signed = int16_t(m_dac_data << 7) >> 7;
+            // Scale to match FM output range (-8192 to 8191): multiply by 32
+            int32_t dacval = static_cast<int32_t>(dac_signed) * 32;
+            output.data[0] = dacval;
+            output.data[1] = dacval;
+        }
     }
 
     // Get full stereo output (all channels mixed with panning applied by ymfm)
     void get_stereo_output(output_data &output) {
         output.clear();
         m_fm.output(output, 0, 32767, 0x3F);  // All 6 channels with panning
-        // Note: ymfm handles DAC automatically - when enabled, it replaces ch6 FM
+
+        // Handle DAC - add to stereo mix when enabled
+        if (m_dac_enable) {
+            int16_t dac_signed = int16_t(m_dac_data << 7) >> 7;
+            int32_t dacval = static_cast<int32_t>(dac_signed) * 32;
+            output.data[0] += dacval;
+            output.data[1] += dacval;
+        }
     }
 
     // Access DAC state
