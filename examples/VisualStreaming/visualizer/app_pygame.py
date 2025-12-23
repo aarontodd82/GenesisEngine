@@ -84,24 +84,25 @@ void main() {
     float brightness = dot(color, vec3(0.299, 0.587, 0.114));
     color += bloom * brightness * 0.3;
 
-    // Scanlines - these are physical CRT properties, use SCREEN coordinates (TexCoord not uv)
-    float scanlinePos = TexCoord.y * resolution.y;
+    // Scanlines - 2.5 screen pixels per scanline, 25% contrast
+    float scanlinePos = TexCoord.y * resolution.y / 2.5;
     float scanline = sin(scanlinePos * 3.14159);
-    float scanlineMask = 0.85 + 0.15 * smoothstep(-0.5, 0.5, scanline);
+    float scanlineMask = 0.75 + 0.25 * smoothstep(-0.5, 0.5, scanline);
+    scanlineMask = mix(scanlineMask, 1.0, brightness * 0.4);  // Bright areas show less scanline
     color *= scanlineMask;
 
-    // Phosphor/aperture grille - also physical, use SCREEN coordinates
-    float pixelX = TexCoord.x * resolution.x;
+    // Phosphor/aperture grille - 6 pixel triads, 28% blend
+    float pixelX = TexCoord.x * resolution.x / 2.0;
     int subpixel = int(mod(pixelX, 3.0));
     vec3 phosphorMask;
     if (subpixel == 0) {
-        phosphorMask = vec3(1.0, 0.7, 0.7);
+        phosphorMask = vec3(1.0, 0.75, 0.75);
     } else if (subpixel == 1) {
-        phosphorMask = vec3(0.7, 1.0, 0.7);
+        phosphorMask = vec3(0.75, 1.0, 0.75);
     } else {
-        phosphorMask = vec3(0.7, 0.7, 1.0);
+        phosphorMask = vec3(0.75, 0.75, 1.0);
     }
-    color *= mix(vec3(1.0), phosphorMask, 0.15);
+    color *= mix(vec3(1.0), phosphorMask, 0.28);
 
     // Vignette
     float vignette = 1.0 - dist * 0.2;
@@ -364,28 +365,29 @@ class VisualizerApp:
 
     def _init_gl(self):
         """Initialize OpenGL resources."""
-        # Initialize fonts
+        # Initialize fonts - scale by DPI for HiDPI displays
         pygame.font.init()
-        self.font = pygame.font.SysFont('consolas', 14)
-        self.font_small = pygame.font.SysFont('consolas', 12)
+        dpi = getattr(self, 'dpi_scale', 1.0)
+        self.font = pygame.font.SysFont('consolas', int(14 * dpi))
+        self.font_small = pygame.font.SysFont('consolas', int(12 * dpi))
         # Specific fonts for branding
         # FM-90s uses Neuropol, Genesis Engine uses NiseGenesis
         try:
-            self.font_fm90s = pygame.font.SysFont('Neuropol', 26)
+            self.font_fm90s = pygame.font.SysFont('Neuropol', int(26 * dpi))
             print("Using Neuropol for FM-90s")
         except:
-            self.font_fm90s = pygame.font.SysFont('Impact', 26, bold=True)
+            self.font_fm90s = pygame.font.SysFont('Impact', int(26 * dpi), bold=True)
             print("Neuropol not found, using Impact")
 
         try:
-            self.font_genesis = pygame.font.SysFont('NiseGenesis', 24)
+            self.font_genesis = pygame.font.SysFont('NiseGenesis', int(24 * dpi))
             print("Using NiseGenesis for Genesis Engine")
         except:
-            self.font_genesis = pygame.font.SysFont('Impact', 24, bold=True)
+            self.font_genesis = pygame.font.SysFont('Impact', int(24 * dpi), bold=True)
             print("NiseGenesis not found, using Impact")
 
         # Fallback brand font
-        self.font_brand = pygame.font.SysFont('Impact', 24, bold=True)
+        self.font_brand = pygame.font.SysFont('Impact', int(24 * dpi), bold=True)
 
         self.text_cache = {}  # Cache rendered text textures
 
@@ -935,9 +937,10 @@ class VisualizerApp:
 
     def _render_scene(self):
         """Render the main scene to framebuffer."""
-        padding = 10
-        status_height = 60
-        keyboard_width = 50
+        dpi = getattr(self, 'dpi_scale', 1.0)
+        padding = int(10 * dpi)
+        status_height = int(60 * dpi)
+        keyboard_width = int(50 * dpi)
 
         available_height = self.height - status_height - padding * 2
         available_width = self.width - padding * 2 - keyboard_width - padding
@@ -1026,34 +1029,36 @@ class VisualizerApp:
 
     def _draw_status_bar(self, x, y, w, h):
         """Draw status bar with branding and info."""
+        dpi = getattr(self, 'dpi_scale', 1.0)
+
         # Background
         self._draw_rect(x, y, w, h, self.COLORS['panel'])
 
         # Branding - FM-90s in cyan/blue (Neuropol font) - top left
         fm90s_color = (0.0, 0.24, 0.67, 1.0)  # Deep Sega blue
-        self._draw_text_glowing("FM-90s", x + 10, y + 10, fm90s_color, font=self.font_fm90s, glow_strength=0.8)
+        self._draw_text_glowing("FM-90s", x + int(10 * dpi), y + int(10 * dpi), fm90s_color, font=self.font_fm90s, glow_strength=0.8)
 
         # Genesis Engine in Sega red (NiseGenesis font) - centered
         engine_color = (1.0, 0.2, 0.2, 1.0)  # Sega red
         engine_text = "GENESIS ENGINE"
         engine_width = self.font_genesis.size(engine_text)[0]
         engine_x = x + (w - engine_width) // 2
-        self._draw_text_glowing(engine_text, engine_x, y + 12, engine_color, font=self.font_genesis, glow_strength=0.8)
+        self._draw_text_glowing(engine_text, engine_x, y + int(12 * dpi), engine_color, font=self.font_genesis, glow_strength=0.8)
 
         # Status message - below FM-90s on left side
-        self._draw_text(self.status_message, x + 10, y + 38, self.COLORS['white'])
+        self._draw_text(self.status_message, x + int(10 * dpi), y + int(38 * dpi), self.COLORS['white'])
 
         # Filename
         if self.current_file:
-            self._draw_text(self.current_file, x + w - 300, y + 10, self.COLORS['dim'])
+            self._draw_text(self.current_file, x + w - int(300 * dpi), y + int(10 * dpi), self.COLORS['dim'])
 
         # Progress bar
         if self.total_duration > 0:
             progress = min(1.0, self.elapsed_time / self.total_duration)
-            bar_width = 200
-            bar_height = 8
-            bar_x = x + w - 220
-            bar_y = y + 30
+            bar_width = int(200 * dpi)
+            bar_height = int(8 * dpi)
+            bar_x = x + w - int(220 * dpi)
+            bar_y = y + int(30 * dpi)
 
             # Background
             self._draw_rect(bar_x, bar_y, bar_width, bar_height, (0.2, 0.2, 0.25, 1.0))
@@ -1067,7 +1072,7 @@ class VisualizerApp:
             total_mins = int(self.total_duration) // 60
             total_secs = int(self.total_duration) % 60
             time_str = f"{mins}:{secs:02d} / {total_mins}:{total_secs:02d}"
-            self._draw_text(time_str, bar_x - 100, bar_y - 2, self.COLORS['dim'], self.font_small)
+            self._draw_text(time_str, bar_x - int(100 * dpi), bar_y - int(2 * dpi), self.COLORS['dim'], self.font_small)
 
     def _apply_zoom_shader(self):
         """Apply zoom/pulse effect to content (before CRT effects)."""
@@ -1160,17 +1165,37 @@ class VisualizerApp:
 
     def run(self, title: str = "Genesis Engine Visualizer", width: int = 1280, height: int = 720):
         """Run the visualizer."""
-        self.width = width
-        self.height = height
-
         pygame.init()
+
+        # Set DPI awareness on Windows so we get physical pixels, not scaled logical pixels
+        # This makes CRT effects consistent regardless of Windows display scaling
+        self.dpi_scale = 1.0
+        try:
+            import ctypes
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+            # Get the DPI scale factor
+            hdc = ctypes.windll.user32.GetDC(0)
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(hdc, 88)  # LOGPIXELSX
+            ctypes.windll.user32.ReleaseDC(0, hdc)
+            self.dpi_scale = dpi / 96.0  # 96 is the default DPI (100% scaling)
+        except:
+            try:
+                import ctypes
+                ctypes.windll.user32.SetProcessDPIAware()
+            except:
+                pass
+
+        # Scale window size by DPI so it appears the same physical size on screen
+        self.width = int(width * self.dpi_scale)
+        self.height = int(height * self.dpi_scale)
+
         pygame.display.set_caption(title)
 
         # Use compatibility profile for immediate mode + shaders
         pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
         pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 0)
 
-        self.screen = pygame.display.set_mode((width, height), DOUBLEBUF | OPENGL | RESIZABLE)
+        self.screen = pygame.display.set_mode((self.width, self.height), DOUBLEBUF | OPENGL | RESIZABLE)
 
         self._init_gl()
 
