@@ -1665,11 +1665,68 @@ def run_visual_streamer(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_
     return streamer.stream_with_visualization(port, baud, vgm_path, dac_rate, no_dac, loop_count, crt_enabled)
 
 
-def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True):
-    """Run visualization without hardware - emulator only."""
+def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_enabled=False):
+    """Run visualization without hardware - emulator only, optionally with audio."""
     if not _HAS_VISUALIZATION:
         print("ERROR: Visualization not available. Install imgui-bundle.")
         return False
+
+    # Set up audio if requested
+    audio_stream = None
+    audio_buffer = None
+    audio_lock = None
+    if audio_enabled:
+        try:
+            import sounddevice as sd
+            import numpy as np
+
+            # Ring buffer for audio samples
+            audio_buffer = {'data': np.zeros((44100, 2), dtype=np.float32), 'write_pos': 0, 'read_pos': 0}
+            audio_lock = threading.Lock()
+
+            def audio_callback(outdata, frames, time_info, status):
+                """Sounddevice callback - pulls audio from ring buffer."""
+                with audio_lock:
+                    buf = audio_buffer['data']
+                    read_pos = audio_buffer['read_pos']
+                    write_pos = audio_buffer['write_pos']
+                    buf_len = len(buf)
+
+                    # Calculate available samples
+                    available = (write_pos - read_pos) % buf_len
+
+                    if available >= frames:
+                        # Read from ring buffer (fast path - no wrap)
+                        end_pos = read_pos + frames
+                        if end_pos <= buf_len:
+                            outdata[:] = buf[read_pos:end_pos]
+                        else:
+                            # Wrap around
+                            first_chunk = buf_len - read_pos
+                            outdata[:first_chunk] = buf[read_pos:]
+                            outdata[first_chunk:] = buf[:frames - first_chunk]
+                        audio_buffer['read_pos'] = end_pos % buf_len
+                    else:
+                        # Not enough data - output silence
+                        outdata.fill(0)
+
+            audio_stream = sd.OutputStream(
+                samplerate=44100,
+                channels=2,
+                dtype='float32',
+                blocksize=1024,
+                callback=audio_callback
+            )
+            audio_stream.start()
+            print("Audio output enabled")
+        except ImportError:
+            print("WARNING: sounddevice not installed. Run: pip install sounddevice")
+            print("Continuing without audio...")
+            audio_enabled = False
+        except Exception as e:
+            print(f"WARNING: Could not initialize audio: {e}")
+            print("Continuing without audio...")
+            audio_enabled = False
 
     # Load and parse VGM
     print(f"Loading: {os.path.basename(vgm_path)}")
@@ -1697,9 +1754,32 @@ def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True):
     interceptor.on_dac_mode_change = app.set_dac_mode
     interceptor.on_pitch_change = app.set_channel_pitch
 
+    # Set up audio callback if enabled
+    if audio_enabled and audio_buffer is not None:
+        def on_audio(stereo_samples):
+            """Write stereo samples to ring buffer."""
+            import numpy as np
+            with audio_lock:
+                buf = audio_buffer['data']
+                write_pos = audio_buffer['write_pos']
+                buf_len = len(buf)
+                n = len(stereo_samples)
+
+                # Write samples to ring buffer (fast numpy slicing)
+                end_pos = write_pos + n
+                if end_pos <= buf_len:
+                    buf[write_pos:end_pos] = stereo_samples
+                else:
+                    # Wrap around
+                    first_chunk = buf_len - write_pos
+                    buf[write_pos:] = stereo_samples[:first_chunk]
+                    buf[:n - first_chunk] = stereo_samples[first_chunk:]
+                audio_buffer['write_pos'] = end_pos % buf_len
+        interceptor.on_audio_output = on_audio
+
     filename = os.path.basename(vgm_path)
     app.set_playback_info(filename, total_duration)
-    app.set_status("Offline playback")
+    app.set_status("Offline playback" + (" with audio" if audio_enabled else ""))
 
     interceptor.start()
 
@@ -1746,7 +1826,7 @@ def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True):
                 progress = min(100, elapsed / total_duration * 100) if total_duration > 0 else 0
                 app.set_progress(progress, elapsed)
 
-                # Real-time delay
+                # Real-time delay (audio playback provides its own timing)
                 target_time = start_time + elapsed
                 sleep_time = target_time - time.time()
                 if sleep_time > 0:
@@ -1763,6 +1843,9 @@ def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True):
     finally:
         stop_event.set()
         interceptor.stop()
+        if audio_stream is not None:
+            audio_stream.stop()
+            audio_stream.close()
 
     return True
 
@@ -1816,6 +1899,8 @@ Looping:
                         help='Verbose output')
     parser.add_argument('--offline', action='store_true',
                         help='Run visualization without hardware (emulator only)')
+    parser.add_argument('--audio', action='store_true',
+                        help='Enable audio output in offline mode (requires sounddevice)')
     parser.add_argument('--no-crt', action='store_true',
                         help='Disable CRT shader effects (scanlines, phosphor, etc.)')
 
@@ -1835,7 +1920,12 @@ Looping:
 
     # Offline mode - no hardware needed
     if args.offline:
-        success = run_offline_visualizer(args.file, loop_count=args.loop, crt_enabled=not args.no_crt)
+        success = run_offline_visualizer(
+            args.file,
+            loop_count=args.loop,
+            crt_enabled=not args.no_crt,
+            audio_enabled=args.audio
+        )
         return 0 if success else 1
 
     port = args.port or find_arduino_port()

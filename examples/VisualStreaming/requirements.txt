@@ -9,3 +9,6 @@ numpy>=1.24.0
 
 # Serial communication (same as stream_vgm.py)
 pyserial>=3.5
+
+# Audio output for offline mode (optional - only needed for --audio flag)
+sounddevice>=0.4.6

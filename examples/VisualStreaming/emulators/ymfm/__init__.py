@@ -44,7 +44,8 @@ class YM2612ymfm:
 
     def generate_samples(self, num_samples: int) -> Tuple[np.ndarray, ...]:
         """
-        Generate audio samples for all channels.
+        Generate audio samples for all channels (per-channel mono for visualization).
+        Also captures stereo mix internally - call get_stereo_buffer() to retrieve.
 
         Args:
             num_samples: Number of samples to generate
@@ -59,6 +60,16 @@ class YM2612ymfm:
 
         # Convert to numpy arrays with correct type
         return tuple(np.array(result[ch], dtype=np.float32) for ch in range(self.NUM_CHANNELS))
+
+    def get_stereo_buffer(self) -> np.ndarray:
+        """
+        Get stereo audio captured during the last generate_samples() call.
+        This is the full mix with proper panning - use for audio output.
+
+        Returns:
+            numpy array of shape (num_samples, 2) with L/R channels, float32
+        """
+        return self._chip.get_stereo_buffer()
 
     def is_active(self, channel: int) -> bool:
         """Check if a channel is currently producing output."""

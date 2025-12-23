@@ -70,6 +70,9 @@ class CommandInterceptor:
         # Waveform callback
         self.on_waveform_update: Optional[Callable[[int, np.ndarray], None]] = None
 
+        # Audio output callback (stereo samples for speaker output)
+        self.on_audio_output: Optional[Callable[[np.ndarray], None]] = None
+
         # Key-on callback
         self.on_key_change: Optional[Callable[[int, bool], None]] = None
 
@@ -85,6 +88,7 @@ class CommandInterceptor:
         # Sample buffers for each channel (accumulate before sending)
         self._fm_buffers = [[] for _ in range(6)]
         self._psg_buffers = [[] for _ in range(4)]
+        self._stereo_buffer = []  # For audio output (interleaved L/R)
 
         # FM frequency tracking (fnum, block per channel)
         self._fm_fnum = [0] * 6
@@ -105,6 +109,7 @@ class CommandInterceptor:
         self.sn76489.reset()
         self._fm_buffers = [[] for _ in range(6)]
         self._psg_buffers = [[] for _ in range(4)]
+        self._stereo_buffer = []
         self._dac_enabled = False
 
     def stop(self):
@@ -254,7 +259,7 @@ class CommandInterceptor:
         self._check_fm_frequency(port, addr, data)
 
     def _generate_samples(self, num_samples: int):
-        """Generate samples and buffer them for visualization."""
+        """Generate samples and buffer them for visualization and audio."""
         if num_samples <= 0:
             return
 
@@ -268,13 +273,33 @@ class CommandInterceptor:
         for ch in range(4):
             self._psg_buffers[ch].extend(psg_waves[ch])
 
+        # Capture stereo output if audio callback is set
+        if self.on_audio_output:
+            stereo = self.ym2612.get_stereo_buffer()  # Shape: (num_samples, 2)
+            # Add PSG to stereo mix (PSG is mono, add to both channels)
+            psg_mix = np.zeros(num_samples, dtype=np.float32)
+            for ch in range(4):
+                psg_mix += psg_waves[ch]
+            psg_mix *= 0.5  # Scale PSG relative to FM
+            stereo[:, 0] += psg_mix
+            stereo[:, 1] += psg_mix
+            # Soft clip
+            stereo = np.clip(stereo, -1.0, 1.0)
+            self._stereo_buffer.append(stereo)
+
         # Check if we have enough samples to send
         buffer_len = len(self._fm_buffers[0])
         if buffer_len >= self.MIN_SAMPLES_FOR_UPDATE:
             self._flush_buffers()
 
     def _flush_buffers(self):
-        """Send buffered samples to visualizer."""
+        """Send buffered samples to visualizer and audio output."""
+        # Send stereo to audio output
+        if self.on_audio_output and self._stereo_buffer:
+            stereo = np.concatenate(self._stereo_buffer, axis=0)
+            self.on_audio_output(stereo)
+            self._stereo_buffer = []
+
         if not self.on_waveform_update:
             # Clear buffers if no callback
             self._fm_buffers = [[] for _ in range(6)]

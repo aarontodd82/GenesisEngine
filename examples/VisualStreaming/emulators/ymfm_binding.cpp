@@ -42,18 +42,13 @@ public:
         output.clear();
         // rshift=0 for full amplitude, clipmax=32767
         m_fm.output(output, 0, 32767, 1 << channel);
+    }
 
-        // Handle DAC for channel 5
-        // DAC data is 9-bit, already sign-converted via XOR 0x80 in register write
-        // Use ymfm's formula to sign-extend: int16_t(m_dac_data << 7) >> 7
-        // This gives range -256 to +255
-        if (channel == 5 && m_dac_enable) {
-            int16_t dac_signed = int16_t(m_dac_data << 7) >> 7;
-            // Scale to match FM output range (-8192 to 8191): multiply by 32
-            int32_t dacval = static_cast<int32_t>(dac_signed) * 32;
-            output.data[0] = dacval;
-            output.data[1] = dacval;
-        }
+    // Get full stereo output (all channels mixed with panning applied by ymfm)
+    void get_stereo_output(output_data &output) {
+        output.clear();
+        m_fm.output(output, 0, 32767, 0x3F);  // All 6 channels with panning
+        // Note: ymfm handles DAC automatically - when enabled, it replaces ch6 FM
     }
 
     // Access DAC state
@@ -85,6 +80,9 @@ public:
             m_prev_output[i] = 0.0f;
             m_curr_output[i] = 0.0f;
         }
+        m_prev_stereo[0] = m_prev_stereo[1] = 0.0f;
+        m_curr_stereo[0] = m_curr_stereo[1] = 0.0f;
+        m_stereo_buffer.clear();
     }
 
     void write(int port, int addr, int data) {
@@ -104,6 +102,9 @@ public:
             out_ptrs.push_back(outputs[ch].mutable_data());
         }
 
+        // Also capture stereo output in the same pass (for audio playback)
+        m_stereo_buffer.resize(num_samples * 2);
+
         for (int i = 0; i < num_samples; i++) {
             m_resample_accum += m_resample_ratio;
 
@@ -113,11 +114,13 @@ public:
                 for (int ch = 0; ch < NUM_CHANNELS; ch++) {
                     m_prev_output[ch] = m_curr_output[ch];
                 }
+                m_prev_stereo[0] = m_curr_stereo[0];
+                m_prev_stereo[1] = m_curr_stereo[1];
 
                 // Clock the chip once
                 m_chip.clock_once();
 
-                // Get output for each channel separately
+                // Get output for each channel separately (for visualization)
                 for (int ch = 0; ch < NUM_CHANNELS; ch++) {
                     ymfm::ym2612::output_data output;
                     m_chip.get_channel_output(ch, output);
@@ -128,6 +131,12 @@ public:
                                  static_cast<float>(output.data[1])) / 2.0f / 8192.0f;
                     m_curr_output[ch] = val;
                 }
+
+                // Also get stereo mix (for audio) - same clock, just different extraction
+                ymfm::ym2612::output_data stereo_out;
+                m_chip.get_stereo_output(stereo_out);
+                m_curr_stereo[0] = static_cast<float>(stereo_out.data[0]) / 8192.0f;
+                m_curr_stereo[1] = static_cast<float>(stereo_out.data[1]) / 8192.0f;
             }
 
             float frac = static_cast<float>(m_resample_accum);
@@ -135,6 +144,12 @@ public:
                 float val = m_prev_output[ch] * (1.0f - frac) + m_curr_output[ch] * frac;
                 out_ptrs[ch][i] = std::max(-1.0f, std::min(1.0f, val));
             }
+
+            // Store interpolated stereo in buffer
+            m_stereo_buffer[i * 2] = std::max(-1.0f, std::min(1.0f,
+                m_prev_stereo[0] * (1.0f - frac) + m_curr_stereo[0] * frac));
+            m_stereo_buffer[i * 2 + 1] = std::max(-1.0f, std::min(1.0f,
+                m_prev_stereo[1] * (1.0f - frac) + m_curr_stereo[1] * frac));
         }
 
         py::tuple result(NUM_CHANNELS);
@@ -142,6 +157,18 @@ public:
             result[ch] = outputs[ch];
         }
         return result;
+    }
+
+    // Get stereo buffer captured during last generate_samples() call
+    py::array_t<float> get_stereo_buffer() {
+        size_t num_samples = m_stereo_buffer.size() / 2;
+        py::array_t<float> output({static_cast<py::ssize_t>(num_samples), static_cast<py::ssize_t>(2)});
+        auto out_ptr = output.mutable_unchecked<2>();
+        for (size_t i = 0; i < num_samples; i++) {
+            out_ptr(i, 0) = m_stereo_buffer[i * 2];
+            out_ptr(i, 1) = m_stereo_buffer[i * 2 + 1];
+        }
+        return output;
     }
 
     bool is_active(int channel) {
@@ -160,6 +187,10 @@ private:
     double m_resample_ratio;
     float m_prev_output[NUM_CHANNELS];
     float m_curr_output[NUM_CHANNELS];
+    // Stereo output captured during generate_samples()
+    float m_prev_stereo[2] = {0.0f, 0.0f};
+    float m_curr_stereo[2] = {0.0f, 0.0f};
+    std::vector<float> m_stereo_buffer;  // Interleaved L/R
 };
 
 PYBIND11_MODULE(_ymfm, m) {
@@ -170,6 +201,7 @@ PYBIND11_MODULE(_ymfm, m) {
         .def("reset", &YM2612Wrapper::reset)
         .def("write", &YM2612Wrapper::write)
         .def("generate_samples", &YM2612Wrapper::generate_samples)
+        .def("get_stereo_buffer", &YM2612Wrapper::get_stereo_buffer)
         .def("is_active", &YM2612Wrapper::is_active)
         .def("is_dac_enabled", &YM2612Wrapper::is_dac_enabled);
 }
