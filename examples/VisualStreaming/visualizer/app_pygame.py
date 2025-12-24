@@ -38,9 +38,20 @@ uniform sampler2D screenTexture;
 uniform float time;
 uniform vec2 resolution;
 
-// Bloom disabled for performance - was sampling 11 textures per pixel
+// Original bloom - 11 texture samples per pixel
 vec3 sampleBloom(sampler2D tex, vec2 uv, vec2 pixelSize) {
-    return texture2D(tex, uv).rgb;
+    vec3 bloom = vec3(0.0);
+    float weights[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+
+    bloom += texture2D(tex, uv).rgb * weights[0];
+
+    for (int i = 1; i < 5; i++) {
+        vec2 offset = vec2(float(i) * pixelSize.x * 2.0, 0.0);
+        bloom += texture2D(tex, uv + offset).rgb * weights[i];
+        bloom += texture2D(tex, uv - offset).rgb * weights[i];
+    }
+
+    return bloom;
 }
 
 void main() {
@@ -68,18 +79,22 @@ void main() {
     float b = texture2D(screenTexture, uv - vec2(aberration, 0.0)).b;
     vec3 color = vec3(r, g, b);
 
-    // Bloom disabled for performance
+    // TESTING: Original bloom restored
+    vec3 bloom = sampleBloom(screenTexture, uv, pixelSize);
     float brightness = dot(color, vec3(0.299, 0.587, 0.114));
+    color += bloom * brightness * 0.3;
 
     // Scanlines - 2.5 screen pixels per scanline, 25% contrast
-    float scanlinePos = TexCoord.y * resolution.y / 2.5;
+    // Uses distorted uv so scanlines warp with barrel distortion (authentic CRT)
+    float scanlinePos = uv.y * resolution.y / 2.5;
     float scanline = sin(scanlinePos * 3.14159);
     float scanlineMask = 0.75 + 0.25 * smoothstep(-0.5, 0.5, scanline);
     scanlineMask = mix(scanlineMask, 1.0, brightness * 0.4);  // Bright areas show less scanline
     color *= scanlineMask;
 
     // Phosphor/aperture grille - 6 pixel triads, 28% blend
-    float pixelX = TexCoord.x * resolution.x / 2.0;
+    // Uses distorted uv so phosphors warp with barrel distortion (authentic CRT)
+    float pixelX = uv.x * resolution.x / 2.0;
     int subpixel = int(mod(pixelX, 3.0));
     vec3 phosphorMask;
     if (subpixel == 0) {
