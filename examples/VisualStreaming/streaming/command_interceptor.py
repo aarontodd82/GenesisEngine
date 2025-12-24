@@ -62,6 +62,9 @@ class CommandInterceptor:
     # Maximum samples per visualizer update
     MAX_SAMPLES_FOR_UPDATE = 2048
 
+    # Pre-allocated buffer size (must be >= MAX_SAMPLES_FOR_UPDATE)
+    BUFFER_SIZE = 4096
+
     def __init__(self):
         # Emulators
         self.ym2612 = YM2612ymfm()
@@ -85,10 +88,11 @@ class CommandInterceptor:
         # DAC mode state (FM channel 6 becomes DAC output)
         self._dac_enabled = False
 
-        # Sample buffers for each channel (accumulate before sending)
-        self._fm_buffers = [[] for _ in range(6)]
-        self._psg_buffers = [[] for _ in range(4)]
-        self._stereo_buffer = []  # For audio output (interleaved L/R)
+        # Pre-allocated sample buffers (avoid list allocations)
+        self._fm_buffers = [np.zeros(self.BUFFER_SIZE, dtype=np.float32) for _ in range(6)]
+        self._psg_buffers = [np.zeros(self.BUFFER_SIZE, dtype=np.float32) for _ in range(4)]
+        self._stereo_buffer = np.zeros((self.BUFFER_SIZE, 2), dtype=np.float32)
+        self._buffer_pos = 0  # Current write position in buffers
 
         # FM frequency tracking (fnum, block per channel)
         self._fm_fnum = [0] * 6
@@ -107,9 +111,7 @@ class CommandInterceptor:
         self._running = True
         self.ym2612.reset()
         self.sn76489.reset()
-        self._fm_buffers = [[] for _ in range(6)]
-        self._psg_buffers = [[] for _ in range(4)]
-        self._stereo_buffer = []
+        self._buffer_pos = 0
         self._dac_enabled = False
 
     def stop(self):
@@ -263,69 +265,70 @@ class CommandInterceptor:
         if num_samples <= 0:
             return
 
+        # Check if we need to flush before adding (buffer would overflow)
+        if self._buffer_pos + num_samples > self.BUFFER_SIZE:
+            self._flush_buffers()
+
         # Generate from both chips
         fm_waves = self.ym2612.generate_samples(num_samples)
         psg_waves = self.sn76489.generate_samples(num_samples)
 
-        # Add to buffers
+        # Copy to pre-allocated buffers (fast numpy slice assignment)
+        pos = self._buffer_pos
+        end = pos + num_samples
         for ch in range(6):
-            self._fm_buffers[ch].extend(fm_waves[ch])
+            self._fm_buffers[ch][pos:end] = fm_waves[ch]
         for ch in range(4):
-            self._psg_buffers[ch].extend(psg_waves[ch])
+            self._psg_buffers[ch][pos:end] = psg_waves[ch]
 
         # Capture stereo output if audio callback is set
         if self.on_audio_output:
             stereo = self.ym2612.get_stereo_buffer()  # Shape: (num_samples, 2)
-            # Add PSG to stereo mix (PSG is mono, add to both channels)
-            psg_mix = np.zeros(num_samples, dtype=np.float32)
-            for ch in range(4):
-                psg_mix += psg_waves[ch]
+            # Add PSG to stereo mix (PSG is mono, sum and add to both channels)
+            psg_mix = psg_waves[0] + psg_waves[1] + psg_waves[2] + psg_waves[3]
             psg_mix *= 0.25  # Scale PSG relative to FM
             stereo[:, 0] += psg_mix
             stereo[:, 1] += psg_mix
-            # Soft clip
-            stereo = np.clip(stereo, -1.0, 1.0)
-            self._stereo_buffer.append(stereo)
+            # Soft clip and copy to buffer
+            np.clip(stereo, -1.0, 1.0, out=self._stereo_buffer[pos:end])
+
+        self._buffer_pos = end
 
         # Check if we have enough samples to send
-        buffer_len = len(self._fm_buffers[0])
-        if buffer_len >= self.MIN_SAMPLES_FOR_UPDATE:
+        if self._buffer_pos >= self.MIN_SAMPLES_FOR_UPDATE:
             self._flush_buffers()
 
     def _flush_buffers(self):
         """Send buffered samples to visualizer and audio output."""
-        # Send stereo to audio output
-        if self.on_audio_output and self._stereo_buffer:
-            stereo = np.concatenate(self._stereo_buffer, axis=0)
-            self.on_audio_output(stereo)
-            self._stereo_buffer = []
-
-        if not self.on_waveform_update:
-            # Clear buffers if no callback
-            self._fm_buffers = [[] for _ in range(6)]
-            self._psg_buffers = [[] for _ in range(4)]
+        if self._buffer_pos == 0:
             return
 
-        # Send FM channels
-        for ch in range(6):
-            if self._fm_buffers[ch]:
-                samples = np.array(self._fm_buffers[ch], dtype=np.float32)
-                # Send in chunks if too large
-                while len(samples) > 0:
-                    chunk = samples[:self.MAX_SAMPLES_FOR_UPDATE]
-                    samples = samples[self.MAX_SAMPLES_FOR_UPDATE:]
-                    self.on_waveform_update(ch, chunk)
-                self._fm_buffers[ch] = []
+        buf_len = self._buffer_pos
 
-        # Send PSG channels
-        for ch in range(4):
-            if self._psg_buffers[ch]:
-                samples = np.array(self._psg_buffers[ch], dtype=np.float32)
-                while len(samples) > 0:
-                    chunk = samples[:self.MAX_SAMPLES_FOR_UPDATE]
-                    samples = samples[self.MAX_SAMPLES_FOR_UPDATE:]
-                    self.on_waveform_update(6 + ch, chunk)
-                self._psg_buffers[ch] = []
+        # Send stereo to audio output (single slice, no concatenation)
+        if self.on_audio_output:
+            self.on_audio_output(self._stereo_buffer[:buf_len].copy())
+
+        if self.on_waveform_update:
+            # Send FM channels (slice from pre-allocated buffer)
+            for ch in range(6):
+                # Send in chunks if too large
+                pos = 0
+                while pos < buf_len:
+                    end = min(pos + self.MAX_SAMPLES_FOR_UPDATE, buf_len)
+                    self.on_waveform_update(ch, self._fm_buffers[ch][pos:end])
+                    pos = end
+
+            # Send PSG channels
+            for ch in range(4):
+                pos = 0
+                while pos < buf_len:
+                    end = min(pos + self.MAX_SAMPLES_FOR_UPDATE, buf_len)
+                    self.on_waveform_update(6 + ch, self._psg_buffers[ch][pos:end])
+                    pos = end
+
+        # Reset buffer position (no need to clear arrays)
+        self._buffer_pos = 0
 
     def _check_ym_key_change(self, addr: int, data: int):
         """Check for key-on/off changes in YM2612 writes."""

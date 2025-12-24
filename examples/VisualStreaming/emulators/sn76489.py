@@ -181,56 +181,64 @@ class SN76489:
         """
         outputs = []
 
-        # Generate tone channels
+        # Generate tone channels (vectorized for performance)
         for ch in range(3):
             volume = self.get_volume(ch)
 
             if volume > 0 and self.tone_regs[ch] > 0:
                 freq = self.get_frequency(ch)
-                # Phase increment per sample (in cycles, 0.0 to 1.0 per cycle)
                 phase_inc = freq / self.SAMPLE_RATE
 
-                # Generate samples with continuous phase
-                samples = np.zeros(num_samples, dtype=np.float32)
-                phase = self.phase[ch]
+                # Vectorized phase calculation
+                t = np.arange(num_samples, dtype=np.float32)
+                phases = (self.phase[ch] + t * phase_inc) % 1.0
 
-                for i in range(num_samples):
-                    # Square wave: positive for first half of cycle, negative for second
-                    samples[i] = volume if phase < 0.5 else -volume
-                    phase += phase_inc
-                    if phase >= 1.0:
-                        phase -= 1.0
+                # Square wave: +volume for phase < 0.5, -volume otherwise
+                samples = np.where(phases < 0.5, volume, -volume).astype(np.float32)
 
-                # Save phase for next call
-                self.phase[ch] = phase
+                # Update phase for next call
+                self.phase[ch] = (self.phase[ch] + num_samples * phase_inc) % 1.0
             else:
                 samples = np.zeros(num_samples, dtype=np.float32)
 
             outputs.append(samples)
 
-        # Generate noise channel with proper LFSR
+        # Generate noise channel (simplified for performance)
+        # Full LFSR emulation is too slow - use cached random for visualization
         volume = self.get_volume(3)
         if volume > 0:
             shift_rate = self._get_noise_shift_rate()
             if shift_rate > 0:
-                # Phase increment for noise (how fast the LFSR shifts)
                 phase_inc = shift_rate / self.SAMPLE_RATE
 
-                noise_samples = np.zeros(num_samples, dtype=np.float32)
-                phase = self.noise_counter
+                # Calculate how many LFSR shifts happen in this batch
+                total_phase = self.noise_counter + num_samples * phase_inc
+                num_shifts = int(total_phase)
 
-                for i in range(num_samples):
-                    # Output current LFSR state
-                    noise_samples[i] = self.noise_output * volume
-                    phase += phase_inc
-                    # Shift LFSR when phase wraps
-                    while phase >= 1.0:
-                        phase -= 1.0
+                # Generate noise using vectorized approach
+                # Each sample holds until next shift
+                if num_shifts > 0 and num_samples > 0:
+                    # Pre-generate shift points
+                    t = np.arange(num_samples, dtype=np.float32)
+                    shift_indices = ((self.noise_counter + t * phase_inc) // 1.0).astype(np.int32)
+
+                    # Generate noise values for each unique shift
+                    unique_shifts = np.unique(shift_indices)
+                    noise_values = np.zeros(len(unique_shifts) + 1, dtype=np.float32)
+                    noise_values[0] = self.noise_output * volume
+
+                    for i, _ in enumerate(unique_shifts):
                         self._shift_lfsr()
+                        if i + 1 < len(noise_values):
+                            noise_values[i + 1] = self.noise_output * volume
 
-                self.noise_counter = phase
+                    # Map shift indices to noise values
+                    noise_samples = noise_values[np.minimum(shift_indices, len(noise_values) - 1)]
+                else:
+                    noise_samples = np.full(num_samples, self.noise_output * volume, dtype=np.float32)
+
+                self.noise_counter = total_phase % 1.0
             else:
-                # No shift rate - output constant
                 noise_samples = np.full(num_samples, self.noise_output * volume, dtype=np.float32)
         else:
             noise_samples = np.zeros(num_samples, dtype=np.float32)

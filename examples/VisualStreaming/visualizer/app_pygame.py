@@ -38,20 +38,9 @@ uniform sampler2D screenTexture;
 uniform float time;
 uniform vec2 resolution;
 
-// Attempt to simulate bloom by sampling neighbors
+// Bloom disabled for performance - was sampling 11 textures per pixel
 vec3 sampleBloom(sampler2D tex, vec2 uv, vec2 pixelSize) {
-    vec3 bloom = vec3(0.0);
-    float weights[5] = float[](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
-
-    bloom += texture2D(tex, uv).rgb * weights[0];
-
-    for (int i = 1; i < 5; i++) {
-        vec2 offset = vec2(float(i) * pixelSize.x * 2.0, 0.0);
-        bloom += texture2D(tex, uv + offset).rgb * weights[i];
-        bloom += texture2D(tex, uv - offset).rgb * weights[i];
-    }
-
-    return bloom;
+    return texture2D(tex, uv).rgb;
 }
 
 void main() {
@@ -79,10 +68,8 @@ void main() {
     float b = texture2D(screenTexture, uv - vec2(aberration, 0.0)).b;
     vec3 color = vec3(r, g, b);
 
-    // Add bloom for glow effect on bright areas
-    vec3 bloom = sampleBloom(screenTexture, uv, pixelSize);
+    // Bloom disabled for performance
     float brightness = dot(color, vec3(0.299, 0.587, 0.114));
-    color += bloom * brightness * 0.3;
 
     // Scanlines - 2.5 screen pixels per scanline, 25% contrast
     float scanlinePos = TexCoord.y * resolution.y / 2.5;
@@ -182,6 +169,7 @@ class VisualizerApp:
         self.total_duration = 0.0
         self.elapsed_time = 0.0
         self.status_message = "Ready"
+        self.current_fps = 0.0
 
         self._lock = threading.Lock()
         self.valid_samples = [0] * self.TOTAL_CHANNELS
@@ -1077,6 +1065,11 @@ class VisualizerApp:
             time_str = f"{mins}:{secs:02d} / {total_mins}:{total_secs:02d}"
             self._draw_text(time_str, bar_x - int(100 * dpi), bar_y - int(2 * dpi), self.COLORS['dim'], self.font_small)
 
+        # FPS counter - top right corner
+        fps_str = f"{self.current_fps:.1f} FPS"
+        fps_color = self.COLORS['dim'] if self.current_fps >= 55 else (1.0, 0.3, 0.3, 1.0)
+        self._draw_text(fps_str, x + w - int(70 * dpi), y + int(38 * dpi), fps_color, self.font_small)
+
     def _apply_zoom_shader(self):
         """Apply zoom/pulse effect to content (before CRT effects)."""
         # Render from fb_texture to fb_texture2 with zoom
@@ -1249,6 +1242,7 @@ class VisualizerApp:
 
             pygame.display.flip()
             clock.tick(60)
+            self.current_fps = clock.get_fps()
 
         pygame.quit()
 
