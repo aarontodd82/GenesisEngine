@@ -3,6 +3,7 @@ Pygame + OpenGL visualizer with CRT shader effects.
 Drop-in replacement for app.py with enhanced visual capabilities.
 """
 
+import os
 import numpy as np
 from typing import Optional, Callable
 import threading
@@ -579,8 +580,19 @@ class VisualizerApp:
                 desktop_sizes = pygame.display.get_desktop_sizes()
                 native_w, native_h = desktop_sizes[0] if desktop_sizes else (1920, 1080)
 
-            # Go fullscreen at native resolution
-            self.screen = pygame.display.set_mode((native_w, native_h), DOUBLEBUF | OPENGL | FULLSCREEN)
+            # Go fullscreen using borderless window (works better with OBS/screen capture)
+            self.screen = pygame.display.set_mode((native_w, native_h), DOUBLEBUF | OPENGL | NOFRAME)
+
+            # Position window at monitor origin using Windows API and bring to front
+            try:
+                hwnd = pygame.display.get_wm_info()['window']
+                monitor_x = mi.rcMonitor.left
+                monitor_y = mi.rcMonitor.top
+                HWND_TOP = 0
+                SWP_SHOWWINDOW = 0x0040
+                ctypes.windll.user32.SetWindowPos(hwnd, HWND_TOP, monitor_x, monitor_y, native_w, native_h, SWP_SHOWWINDOW)
+            except:
+                pass  # Fall back to default position
 
             self.screen_width = native_w
             self.screen_height = native_h
@@ -1211,7 +1223,8 @@ class VisualizerApp:
 
         glUseProgram(0)
 
-    def run(self, title: str = "Genesis Engine Visualizer", width: int = 1280, height: int = 720):
+    def run(self, title: str = "Genesis Engine Visualizer", width: int = 1280, height: int = 720,
+            fullscreen: bool = False):
         """Run the visualizer."""
         pygame.init()
 
@@ -1246,6 +1259,10 @@ class VisualizerApp:
         self.screen = pygame.display.set_mode((self.width, self.height), DOUBLEBUF | OPENGL | RESIZABLE)
 
         self._init_gl()
+
+        # Start in fullscreen if requested
+        if fullscreen:
+            self._toggle_fullscreen()
 
         clock = pygame.time.Clock()
         self.running = True

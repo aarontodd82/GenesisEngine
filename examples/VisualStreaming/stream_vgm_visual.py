@@ -1157,7 +1157,8 @@ class VisualStreamer:
         self.start_time = None  # When playback started (shared between threads)
 
     def stream_with_visualization(self, port, baud, vgm_path, dac_rate=None,
-                                   no_dac=False, loop_count=None, crt_enabled=True):
+                                   no_dac=False, loop_count=None, crt_enabled=True,
+                                   fullscreen=False):
         """Stream VGM with visualization."""
 
         # Store loop setting for viz thread
@@ -1196,7 +1197,7 @@ class VisualStreamer:
 
         # Run GUI in main thread (blocking)
         try:
-            self.app.run(title=f"Genesis Visualizer - {filename}")
+            self.app.run(title=f"Genesis Visualizer - {filename}", fullscreen=fullscreen)
         except KeyboardInterrupt:
             pass
         finally:
@@ -1698,17 +1699,19 @@ def stream_vgm_visual_internal(port, baud, vgm_path, dac_rate=None, no_dac=False
         return False
 
 
-def run_visual_streamer(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=None, crt_enabled=True):
+def run_visual_streamer(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=None,
+                        crt_enabled=True, fullscreen=False):
     """Run the visual streamer."""
     if not _HAS_VISUALIZATION:
         print("Visualization not available. Running CLI mode.")
         return stream_vgm(port, baud, vgm_path, dac_rate, no_dac, loop_count)
 
     streamer = VisualStreamer()
-    return streamer.stream_with_visualization(port, baud, vgm_path, dac_rate, no_dac, loop_count, crt_enabled)
+    return streamer.stream_with_visualization(port, baud, vgm_path, dac_rate, no_dac, loop_count,
+                                              crt_enabled, fullscreen)
 
 
-def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_enabled=False):
+def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_enabled=False, fullscreen=False):
     """Run visualization without hardware - emulator only, optionally with audio."""
     if not _HAS_VISUALIZATION:
         print("ERROR: Visualization not available. Install imgui-bundle.")
@@ -1952,7 +1955,7 @@ def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_en
 
     # Run GUI
     try:
-        app.run(title=f"Genesis Visualizer (Offline) - {filename}")
+        app.run(title=f"Genesis Visualizer (Offline) - {filename}", fullscreen=fullscreen)
     finally:
         stop_event.set()
         interceptor.stop()
@@ -2016,6 +2019,8 @@ Looping:
                         help='Enable audio output in offline mode (requires sounddevice)')
     parser.add_argument('--no-crt', action='store_true',
                         help='Disable CRT shader effects (scanlines, phosphor, etc.)')
+    parser.add_argument('--fullscreen', '-f', action='store_true',
+                        help='Start in fullscreen mode')
 
     args = parser.parse_args()
 
@@ -2037,7 +2042,8 @@ Looping:
             args.file,
             loop_count=args.loop,
             crt_enabled=not args.no_crt,
-            audio_enabled=args.audio
+            audio_enabled=args.audio,
+            fullscreen=args.fullscreen
         )
         return 0 if success else 1
 
@@ -2068,7 +2074,8 @@ Looping:
             dac_rate=args.dac_rate,
             no_dac=args.no_dac,
             loop_count=args.loop,
-            crt_enabled=not args.no_crt
+            crt_enabled=not args.no_crt,
+            fullscreen=args.fullscreen
         )
 
     return 0 if success else 1

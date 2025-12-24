@@ -284,12 +284,14 @@ class CommandInterceptor:
         # Capture stereo output if audio callback is set
         if self.on_audio_output:
             stereo = self.ym2612.get_stereo_buffer()  # Shape: (num_samples, 2)
+            # FM stereo sums 6 channels but normalizes by 1 channel max - scale down
+            stereo *= 0.45
             # Add PSG to stereo mix (PSG is mono, sum and add to both channels)
             psg_mix = psg_waves[0] + psg_waves[1] + psg_waves[2] + psg_waves[3]
-            psg_mix *= 0.25  # Scale PSG relative to FM
+            psg_mix *= 0.15  # Scale PSG relative to FM
             stereo[:, 0] += psg_mix
             stereo[:, 1] += psg_mix
-            # Soft clip and copy to buffer
+            # Clip and copy to buffer
             np.clip(stereo, -1.0, 1.0, out=self._stereo_buffer[pos:end])
 
         self._buffer_pos = end
