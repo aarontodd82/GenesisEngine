@@ -4,6 +4,8 @@ Drop-in replacement for app.py with enhanced visual capabilities.
 """
 
 import os
+import subprocess
+import tempfile
 import numpy as np
 from typing import Optional, Callable
 import threading
@@ -13,6 +15,13 @@ import pygame
 from pygame.locals import *
 from OpenGL.GL import *
 from OpenGL.GL import shaders
+
+# Optional cv2 for video recording
+try:
+    import cv2
+    _HAS_CV2 = True
+except ImportError:
+    _HAS_CV2 = False
 
 
 # Pass-through shader (zoom effect removed)
@@ -1223,10 +1232,257 @@ class VisualizerApp:
 
         glUseProgram(0)
 
-    def run(self, title: str = "Genesis Engine Visualizer", width: int = 1280, height: int = 720,
-            fullscreen: bool = False):
-        """Run the visualizer."""
+    def _start_ffmpeg(self):
+        """Start ffmpeg process for real-time encoding."""
+        ffmpeg_path = self._find_ffmpeg()
+        if not ffmpeg_path:
+            print("WARNING: ffmpeg not found, recording disabled")
+            self.recording = False
+            return
+
+        # We'll mux audio later since it's generated during playback
+        # For now, encode video to a temp file
+        self.temp_video = os.path.splitext(self.record_file)[0] + "_video.mp4"
+
+        cmd = [
+            ffmpeg_path, '-y',
+            '-f', 'rawvideo',
+            '-vcodec', 'rawvideo',
+            '-s', f'{self.width}x{self.height}',
+            '-pix_fmt', 'rgb24',
+            '-r', '60',
+            '-i', 'pipe:0',
+            '-c:v', 'libx264',
+            '-preset', 'fast',  # Fast for real-time
+            '-crf', '18',
+            '-pix_fmt', 'yuv420p',
+            self.temp_video
+        ]
+
+        try:
+            creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            self.ffmpeg_proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=creationflags
+            )
+            print(f"Recording to: {self.record_file}")
+        except Exception as e:
+            print(f"WARNING: Failed to start ffmpeg: {e}")
+            self.recording = False
+
+    def _capture_frame(self):
+        """Capture current frame and pipe to ffmpeg in real-time."""
+        # Only capture after playback has started (for audio sync)
+        if not self.recording_started:
+            return
+
+        # Start ffmpeg on first frame
+        if self.ffmpeg_proc is None:
+            self._start_ffmpeg()
+            if not self.recording:
+                return
+
+        # Read from screen (after CRT shader is applied)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        pixels = glReadPixels(0, 0, self.width, self.height, GL_RGB, GL_UNSIGNED_BYTE)
+        frame = np.frombuffer(pixels, dtype=np.uint8).reshape(self.height, self.width, 3)
+
+        # OpenGL origin is bottom-left, flip vertically
+        frame = np.flipud(frame)
+
+        # Pipe to ffmpeg
+        try:
+            self.ffmpeg_proc.stdin.write(frame.tobytes())
+            self.frames_written += 1
+        except (BrokenPipeError, OSError):
+            print("WARNING: ffmpeg pipe closed unexpectedly")
+            self.recording = False
+
+    def _find_ffmpeg(self):
+        """Find ffmpeg executable."""
+        import shutil
+
+        # Check if in PATH
+        ffmpeg = shutil.which('ffmpeg')
+        if ffmpeg:
+            return ffmpeg
+
+        # Check common Windows locations
+        common_paths = [
+            os.path.expandvars(r'%LOCALAPPDATA%\Microsoft\WinGet\Packages'),
+            r'C:\ffmpeg\bin',
+            r'C:\Program Files\ffmpeg\bin',
+        ]
+
+        for base_path in common_paths:
+            if os.path.exists(base_path):
+                for root, dirs, files in os.walk(base_path):
+                    if 'ffmpeg.exe' in files:
+                        return os.path.join(root, 'ffmpeg.exe')
+
+        return None
+
+    def _finalize_recording(self):
+        """Finalize real-time recording and mux audio if available."""
+        if not self.ffmpeg_proc:
+            return
+
+        print(f"\nFinalizing recording...")
+        print(f"Frames: {self.frames_written}, Resolution: {self.width}x{self.height}")
+
+        # Close video encoding pipe
+        try:
+            self.ffmpeg_proc.stdin.close()
+            self.ffmpeg_proc.wait(timeout=30)
+        except Exception as e:
+            print(f"WARNING: Error closing ffmpeg: {e}")
+
+        # Check if we have audio to mux
+        audio_file = getattr(self, 'audio_file', None)
+        temp_video = getattr(self, 'temp_video', None)
+        actual_fps = getattr(self, 'actual_fps', 60.0)
+
+        if audio_file and os.path.exists(audio_file) and temp_video and os.path.exists(temp_video):
+            ffmpeg_path = self._find_ffmpeg()
+            if ffmpeg_path:
+                print(f"  Muxing audio (adjusting video to {actual_fps:.1f} fps)...")
+                # Use filter to adjust video speed to match audio duration
+                # pts = presentation timestamp, dividing slows down if actual_fps < 60
+                speed_factor = 60.0 / actual_fps
+                cmd = [
+                    ffmpeg_path, '-y',
+                    '-i', temp_video,
+                    '-i', audio_file,
+                    '-filter:v', f'setpts={speed_factor}*PTS',
+                    '-r', str(actual_fps),
+                    '-c:v', 'libx264',
+                    '-preset', 'fast',
+                    '-crf', '18',
+                    '-c:a', 'aac',
+                    '-b:a', '256k',
+                    '-shortest',
+                    self.record_file
+                ]
+                try:
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                    if result.returncode == 0:
+                        os.remove(temp_video)
+                        os.remove(audio_file)
+                        print(f"Saved: {self.record_file}")
+                    else:
+                        print(f"WARNING: Mux failed: {result.stderr[:200]}")
+                        os.rename(temp_video, self.record_file)
+                        print(f"Saved (no audio): {self.record_file}")
+                except Exception as e:
+                    print(f"WARNING: Mux error: {e}")
+                    if os.path.exists(temp_video):
+                        os.rename(temp_video, self.record_file)
+        elif temp_video and os.path.exists(temp_video):
+            os.rename(temp_video, self.record_file)
+            print(f"Saved: {self.record_file}")
+
+    def init_offscreen(self, width: int, height: int, crt_enabled: bool = True):
+        """Initialize for offscreen rendering (minimal window, renders to framebuffer)."""
         pygame.init()
+
+        # Position window off-screen or minimized
+        os.environ['SDL_VIDEO_WINDOW_POS'] = '-10000,-10000'
+
+        pygame.display.set_caption("Rendering...")
+        pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
+        pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 0)
+
+        # Create a small window (we render to framebuffers)
+        pygame.display.set_mode((320, 240), DOUBLEBUF | OPENGL)
+
+        self.width = width
+        self.height = height
+        self.crt_enabled = crt_enabled
+        self.offscreen_mode = True
+
+        # Initialize OpenGL with our target resolution
+        self._init_gl()
+
+    def render_frame_offscreen(self):
+        """Render a single frame and return as numpy array."""
+        # Pass 1: Render scene to framebuffer -> fb_texture
+        glBindFramebuffer(GL_FRAMEBUFFER, self.framebuffer)
+        glViewport(0, 0, self.width, self.height)
+        self._render_scene()
+
+        # Pass 2: Apply zoom shader: fb_texture -> framebuffer2 -> fb_texture2
+        self._apply_zoom_shader()
+
+        # Pass 3: Apply CRT shader: fb_texture2 -> framebuffer -> fb_texture
+        # (Re-use framebuffer to avoid reading/writing same texture)
+        shader = self.crt_shader if self.crt_enabled else self.zoom_shader
+        glUseProgram(shader)
+
+        # Render CRT back to framebuffer (fb_texture)
+        glBindFramebuffer(GL_FRAMEBUFFER, self.framebuffer)
+        glViewport(0, 0, self.width, self.height)
+        glClear(GL_COLOR_BUFFER_BIT)
+
+        # Set uniforms
+        if self.crt_enabled:
+            glUniform1f(glGetUniformLocation(shader, "time"), 0)
+            glUniform2f(glGetUniformLocation(shader, "resolution"), self.width, self.height)
+
+        # Bind zoom output texture (fb_texture2)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self.fb_texture2)
+        glUniform1i(glGetUniformLocation(shader, "screenTexture"), 0)
+
+        # Draw fullscreen quad
+        glBegin(GL_QUADS)
+        glTexCoord2f(0, 0); glVertex2f(-1, -1)
+        glTexCoord2f(1, 0); glVertex2f(1, -1)
+        glTexCoord2f(1, 1); glVertex2f(1, 1)
+        glTexCoord2f(0, 1); glVertex2f(-1, 1)
+        glEnd()
+
+        glUseProgram(0)
+
+        # Read pixels from framebuffer (fb_texture)
+        pixels = glReadPixels(0, 0, self.width, self.height, GL_RGB, GL_UNSIGNED_BYTE)
+        frame = np.frombuffer(pixels, dtype=np.uint8).reshape(self.height, self.width, 3)
+        frame = np.flipud(frame)  # OpenGL origin is bottom-left
+
+        return frame.copy()
+
+    def cleanup_offscreen(self):
+        """Clean up offscreen rendering resources."""
+        pygame.quit()
+        if 'SDL_VIDEO_WINDOW_POS' in os.environ:
+            del os.environ['SDL_VIDEO_WINDOW_POS']
+
+    def run(self, title: str = "Genesis Engine Visualizer", width: int = 1280, height: int = 720,
+            fullscreen: bool = False, record_file: str = None):
+        """Run the visualizer.
+
+        Args:
+            title: Window title
+            width: Render width (and window width if it fits)
+            height: Render height (and window height if it fits)
+            fullscreen: Start in fullscreen mode
+            record_file: If set, record video to this file (requires opencv-python)
+        """
+        pygame.init()
+
+        # Recording setup
+        self.recording = record_file is not None
+        self.record_file = record_file
+        self.recording_started = False  # Set to True when playback starts (for sync)
+        self.ffmpeg_proc = None  # Real-time encoding process
+        self.frames_written = 0
+
+        if self.recording and not _HAS_CV2:
+            print("WARNING: opencv-python not installed. Recording disabled.")
+            print("Install with: pip install opencv-python")
+            self.recording = False
 
         # Set DPI awareness on Windows so we get physical pixels, not scaled logical pixels
         # This makes CRT effects consistent regardless of Windows display scaling
@@ -1246,9 +1502,19 @@ class VisualizerApp:
             except:
                 pass
 
-        # Scale window size by DPI so it appears the same physical size on screen
-        self.width = int(width * self.dpi_scale)
-        self.height = int(height * self.dpi_scale)
+        # When recording, use exact requested dimensions (no DPI scaling, no window scaling)
+        # Window may extend off-screen but OpenGL capture still works at full resolution
+        if self.recording:
+            self.width = width
+            self.height = height
+            self.window_width = width
+            self.window_height = height
+        else:
+            # Scale by DPI for proper display
+            self.width = int(width * self.dpi_scale)
+            self.height = int(height * self.dpi_scale)
+            self.window_width = self.width
+            self.window_height = self.height
 
         pygame.display.set_caption(title)
 
@@ -1256,7 +1522,7 @@ class VisualizerApp:
         pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MAJOR_VERSION, 3)
         pygame.display.gl_set_attribute(pygame.GL_CONTEXT_MINOR_VERSION, 0)
 
-        self.screen = pygame.display.set_mode((self.width, self.height), DOUBLEBUF | OPENGL | RESIZABLE)
+        self.screen = pygame.display.set_mode((self.window_width, self.window_height), DOUBLEBUF | OPENGL | RESIZABLE)
 
         self._init_gl()
 
@@ -1301,6 +1567,10 @@ class VisualizerApp:
 
             # Pass 3: Apply CRT shader to screen
             self._apply_crt_shader()
+
+            # Capture frame for recording (before flip, from the CRT output framebuffer)
+            if self.recording:
+                self._capture_frame()
 
             pygame.display.flip()
             clock.tick(60)
