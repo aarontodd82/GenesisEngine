@@ -1158,14 +1158,14 @@ class VisualStreamer:
 
     def stream_with_visualization(self, port, baud, vgm_path, dac_rate=None,
                                    no_dac=False, loop_count=None, crt_enabled=True,
-                                   fullscreen=False, portrait=False):
+                                   fullscreen=False):
         """Stream VGM with visualization."""
 
         # Store loop setting for viz thread
         self.loop_count = loop_count
 
         # Create visualizer app
-        self.app = VisualizerApp(crt_enabled=crt_enabled, portrait_mode=portrait)
+        self.app = VisualizerApp(crt_enabled=crt_enabled)
 
         # Create command interceptor
         self.interceptor = CommandInterceptor()
@@ -1197,10 +1197,7 @@ class VisualStreamer:
 
         # Run GUI in main thread (blocking)
         try:
-            if portrait:
-                self.app.run(title=f"Genesis Visualizer - {filename}", width=1080, height=1350, fullscreen=fullscreen)
-            else:
-                self.app.run(title=f"Genesis Visualizer - {filename}", fullscreen=fullscreen)
+            self.app.run(title=f"Genesis Visualizer - {filename}", fullscreen=fullscreen)
         except KeyboardInterrupt:
             pass
         finally:
@@ -1703,7 +1700,7 @@ def stream_vgm_visual_internal(port, baud, vgm_path, dac_rate=None, no_dac=False
 
 
 def run_visual_streamer(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_count=None,
-                        crt_enabled=True, fullscreen=False, portrait=False):
+                        crt_enabled=True, fullscreen=False):
     """Run the visual streamer."""
     if not _HAS_VISUALIZATION:
         print("Visualization not available. Running CLI mode.")
@@ -1711,19 +1708,32 @@ def run_visual_streamer(port, baud, vgm_path, dac_rate=None, no_dac=False, loop_
 
     streamer = VisualStreamer()
     return streamer.stream_with_visualization(port, baud, vgm_path, dac_rate, no_dac, loop_count,
-                                              crt_enabled, fullscreen, portrait)
+                                              crt_enabled, fullscreen)
 
 
-def run_offline_recording(vgm_path, record_file, loop_count=None, crt_enabled=True, portrait=False):
+def run_offline_recording(vgm_path, record_file, loop_count=None, crt_enabled=True, aspect='16:9'):
     """Render video offline (non-realtime) for perfect sync.
 
     Renders exactly 60fps, processes audio in sync, no playback.
+
+    Args:
+        aspect: Aspect ratio - '16:9' (1920x1080), '4:3' (1440x1080),
+                '4:5' (1080x1350), '9:16' (1080x1920)
     """
     import wave
     import subprocess
     import numpy as np
 
-    print(f"Offline recording mode: {record_file}")
+    # Calculate dimensions and portrait mode based on aspect ratio
+    aspect_configs = {
+        '16:9': (1920, 1080, False),
+        '4:3': (1440, 1080, False),
+        '4:5': (1080, 1350, True),
+        '9:16': (1080, 1920, True),
+    }
+    width, height, portrait_mode = aspect_configs.get(aspect, (1920, 1080, False))
+
+    print(f"Recording: {record_file} ({width}x{height}, {aspect})")
 
     # Load and parse VGM
     print(f"Loading: {os.path.basename(vgm_path)}")
@@ -1748,7 +1758,7 @@ def run_offline_recording(vgm_path, record_file, loop_count=None, crt_enabled=Tr
     print(f"Frames to render: {total_frames}")
 
     # Create visualizer and interceptor
-    app = VisualizerApp(crt_enabled=crt_enabled, portrait_mode=portrait)
+    app = VisualizerApp(crt_enabled=crt_enabled, portrait_mode=portrait_mode)
     interceptor = CommandInterceptor()
 
     # Connect callbacks
@@ -1776,10 +1786,6 @@ def run_offline_recording(vgm_path, record_file, loop_count=None, crt_enabled=Tr
     app.set_status("Rendering...")
 
     interceptor.start()
-
-    # Set up rendering dimensions
-    width = 1080 if portrait else 1280
-    height = 1350 if portrait else 720
 
     # Initialize app for offline rendering
     app.init_offscreen(width, height, crt_enabled)
@@ -1939,22 +1945,11 @@ def run_offline_recording(vgm_path, record_file, loop_count=None, crt_enabled=Tr
     return True
 
 
-def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_enabled=False, fullscreen=False, portrait=False, record_file=None):
-    """Run visualization without hardware - emulator only, optionally with audio.
-
-    Args:
-        record_file: If set, record video to this file. Audio is automatically included.
-    """
+def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_enabled=False, fullscreen=False):
+    """Run visualization without hardware - emulator only, optionally with audio."""
     if not _HAS_VISUALIZATION:
         print("ERROR: Visualization not available. Install imgui-bundle.")
         return False
-
-    # If recording, use offline rendering mode (non-realtime, perfect sync)
-    if record_file:
-        return run_offline_recording(vgm_path, record_file, loop_count, crt_enabled, portrait)
-
-    # Regular real-time playback mode
-    record_audio_samples = []  # Accumulate audio for recording
 
     # Set up audio if requested
     audio_stream = None
@@ -2035,7 +2030,7 @@ def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_en
     print(f"Commands: {len(commands)}")
 
     # Create visualizer and interceptor
-    app = VisualizerApp(crt_enabled=crt_enabled, portrait_mode=portrait)
+    app = VisualizerApp(crt_enabled=crt_enabled)
     interceptor = CommandInterceptor()
 
     # Audio buffer latency compensation
@@ -2102,12 +2097,8 @@ def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_en
     # Set up audio callback if enabled
     if audio_enabled and audio_buffer is not None:
         def on_audio(stereo_samples):
-            """Write stereo samples to ring buffer and optionally record."""
+            """Write stereo samples to ring buffer."""
             import numpy as np
-
-            # Accumulate for recording
-            if record_file:
-                record_audio_samples.append(stereo_samples.copy())
 
             with audio_lock:
                 buf = audio_buffer['data']
@@ -2206,51 +2197,13 @@ def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_en
 
     # Run GUI
     try:
-        if portrait:
-            app.run(title=f"Genesis Visualizer (Offline) - {filename}", width=1080, height=1350,
-                    fullscreen=fullscreen, record_file=record_file)
-        else:
-            app.run(title=f"Genesis Visualizer (Offline) - {filename}",
-                    fullscreen=fullscreen, record_file=record_file)
+        app.run(title=f"Genesis Visualizer (Offline) - {filename}", fullscreen=fullscreen)
     finally:
         stop_event.set()
         interceptor.stop()
         if audio_stream is not None:
             audio_stream.stop()
             audio_stream.close()
-
-    # Save recorded audio and finalize video if recording
-    if record_file and hasattr(app, 'ffmpeg_proc') and app.ffmpeg_proc:
-        if record_audio_samples:
-            import wave
-
-            # Concatenate all audio samples
-            all_audio = np.concatenate(record_audio_samples, axis=0)
-
-            # Calculate actual duration and correct FPS
-            audio_duration = len(all_audio) / 44100.0
-            if app.frames_written > 0 and audio_duration > 0:
-                actual_fps = app.frames_written / audio_duration
-                print(f"Audio duration: {audio_duration:.2f}s, Frames: {app.frames_written}, Actual FPS: {actual_fps:.1f}")
-                app.actual_fps = actual_fps
-
-            # Save to temp WAV file
-            audio_wav = os.path.splitext(record_file)[0] + "_audio.wav"
-
-            # Convert float32 [-1, 1] to int16
-            audio_int16 = (all_audio * 32767).astype(np.int16)
-
-            # Write using built-in wave module
-            with wave.open(audio_wav, 'wb') as wf:
-                wf.setnchannels(2)  # Stereo
-                wf.setsampwidth(2)  # 16-bit
-                wf.setframerate(44100)
-                wf.writeframes(audio_int16.tobytes())
-
-            # Set audio file path for video muxing
-            app.audio_file = audio_wav
-
-        app._finalize_recording()
 
     return True
 
@@ -2310,10 +2263,8 @@ Looping:
                         help='Disable CRT shader effects (scanlines, phosphor, etc.)')
     parser.add_argument('--fullscreen', '-f', action='store_true',
                         help='Start in fullscreen mode')
-    parser.add_argument('--portrait', action='store_true',
-                        help='Start in 4:5 portrait aspect ratio (1080x1350, Instagram optimal)')
-    parser.add_argument('--record', metavar='FILE',
-                        help='Record video to FILE (e.g., output.mp4). Requires opencv-python and ffmpeg for audio.')
+    parser.add_argument('--record', choices=['16:9', '4:3', '4:5', '9:16'],
+                        help='Record video at aspect ratio: 16:9 (1920x1080), 4:3 (1440x1080), 4:5 (1080x1350), 9:16 (1080x1920). Output filename derived from input.')
 
     args = parser.parse_args()
 
@@ -2329,6 +2280,20 @@ Looping:
         print(f"ERROR: File not found: {args.file}")
         return 1
 
+    # Recording mode - automatically offline
+    if args.record:
+        # Derive output filename from input
+        base_name = os.path.splitext(os.path.basename(args.file))[0]
+        record_file = f"{base_name}_{args.record.replace(':', 'x')}.mp4"
+        success = run_offline_recording(
+            args.file,
+            record_file=record_file,
+            loop_count=args.loop,
+            crt_enabled=not args.no_crt,
+            aspect=args.record
+        )
+        return 0 if success else 1
+
     # Offline mode - no hardware needed
     if args.offline:
         success = run_offline_visualizer(
@@ -2336,9 +2301,7 @@ Looping:
             loop_count=args.loop,
             crt_enabled=not args.no_crt,
             audio_enabled=args.audio,
-            fullscreen=args.fullscreen,
-            portrait=args.portrait,
-            record_file=args.record
+            fullscreen=args.fullscreen
         )
         return 0 if success else 1
 
@@ -2370,8 +2333,7 @@ Looping:
             no_dac=args.no_dac,
             loop_count=args.loop,
             crt_enabled=not args.no_crt,
-            fullscreen=args.fullscreen,
-            portrait=args.portrait
+            fullscreen=args.fullscreen
         )
 
     return 0 if success else 1
