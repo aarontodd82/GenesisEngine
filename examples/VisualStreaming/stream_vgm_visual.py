@@ -1675,6 +1675,7 @@ def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_en
     audio_stream = None
     audio_buffer = None
     audio_lock = None
+    audio_output_latency = 0  # Will be set from stream.latency if audio enabled
     if audio_enabled:
         try:
             import sounddevice as sd
@@ -1718,7 +1719,9 @@ def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_en
                 callback=audio_callback
             )
             audio_stream.start()
-            print("Audio output enabled")
+            # Get actual output latency reported by the audio system
+            audio_output_latency = audio_stream.latency  # in seconds
+            print(f"Audio output enabled (latency: {audio_output_latency*1000:.0f}ms)")
         except ImportError:
             print("WARNING: sounddevice not installed. Run: pip install sounddevice")
             print("Continuing without audio...")
@@ -1749,10 +1752,67 @@ def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_en
     # Create visualizer and interceptor
     app = VisualizerApp(crt_enabled=crt_enabled)
     interceptor = CommandInterceptor()
-    interceptor.on_waveform_update = app.update_waveform
-    interceptor.on_key_change = app.set_key_on
-    interceptor.on_dac_mode_change = app.set_dac_mode
-    interceptor.on_pitch_change = app.set_channel_pitch
+
+    # Audio buffer latency compensation
+    # The audio ring buffer introduces latency, so we delay visualization to match
+    if audio_enabled:
+        # Total latency = our ring buffer fill time + audio system reported latency
+        AUDIO_SAMPLERATE = 44100
+        AUDIO_BLOCKSIZE = 1024  # Samples per audio callback
+        RING_BUFFER_BLOCKS = 2  # Blocks we buffer before audio callback has data
+        ring_buffer_latency = (AUDIO_BLOCKSIZE * RING_BUFFER_BLOCKS) / AUDIO_SAMPLERATE
+        # audio_output_latency is set when stream starts (includes driver + OS + hardware)
+        AUDIO_LATENCY_SECONDS = ring_buffer_latency + audio_output_latency
+
+        viz_delay_queue = []  # Queue of (timestamp, callback, args)
+        viz_delay_lock = threading.Lock()
+
+        def delayed_waveform_update(channel, data):
+            """Queue waveform update to be delivered after audio latency delay."""
+            deliver_time = time.time() + AUDIO_LATENCY_SECONDS
+            with viz_delay_lock:
+                viz_delay_queue.append((deliver_time, 'waveform', (channel, data.copy())))
+
+        def delayed_key_change(channel, on):
+            deliver_time = time.time() + AUDIO_LATENCY_SECONDS
+            with viz_delay_lock:
+                viz_delay_queue.append((deliver_time, 'key', (channel, on)))
+
+        def delayed_dac_mode(enabled):
+            deliver_time = time.time() + AUDIO_LATENCY_SECONDS
+            with viz_delay_lock:
+                viz_delay_queue.append((deliver_time, 'dac', (enabled,)))
+
+        def delayed_pitch_change(channel, pitch):
+            deliver_time = time.time() + AUDIO_LATENCY_SECONDS
+            with viz_delay_lock:
+                viz_delay_queue.append((deliver_time, 'pitch', (channel, pitch)))
+
+        def process_delayed_updates():
+            """Process any delayed updates that are ready to be delivered."""
+            now = time.time()
+            with viz_delay_lock:
+                while viz_delay_queue and viz_delay_queue[0][0] <= now:
+                    _, update_type, args = viz_delay_queue.pop(0)
+                    if update_type == 'waveform':
+                        app.update_waveform(*args)
+                    elif update_type == 'key':
+                        app.set_key_on(*args)
+                    elif update_type == 'dac':
+                        app.set_dac_mode(*args)
+                    elif update_type == 'pitch':
+                        app.set_channel_pitch(*args)
+
+        interceptor.on_waveform_update = delayed_waveform_update
+        interceptor.on_key_change = delayed_key_change
+        interceptor.on_dac_mode_change = delayed_dac_mode
+        interceptor.on_pitch_change = delayed_pitch_change
+    else:
+        process_delayed_updates = None  # No delay needed without audio
+        interceptor.on_waveform_update = app.update_waveform
+        interceptor.on_key_change = app.set_key_on
+        interceptor.on_dac_mode_change = app.set_dac_mode
+        interceptor.on_pitch_change = app.set_channel_pitch
 
     # Set up audio callback if enabled
     if audio_enabled and audio_buffer is not None:
@@ -1792,6 +1852,10 @@ def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_en
         samples_played = 0
 
         while not stop_event.is_set() and cmd_idx < len(commands):
+            # Process any delayed visualization updates (audio latency compensation)
+            if process_delayed_updates:
+                process_delayed_updates()
+
             cmd, args = commands[cmd_idx]
             cmd_idx += 1
 
