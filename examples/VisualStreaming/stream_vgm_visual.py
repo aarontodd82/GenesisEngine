@@ -1899,6 +1899,9 @@ def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_en
     stop_event = threading.Event()
 
     def playback_thread():
+        # Brief delay to let window/shaders initialize before playback starts
+        time.sleep(0.5)
+
         start_time = time.time()
         cmd_idx = 0
         samples_played = 0
