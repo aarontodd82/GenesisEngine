@@ -185,6 +185,8 @@ class VisualizerApp:
         self.elapsed_time = 0.0
         self.status_message = "Ready"
         self.current_fps = 0.0
+        self.composer = ""
+        self.game = ""
 
         self._lock = threading.Lock()
         self.valid_samples = [0] * self.TOTAL_CHANNELS
@@ -266,9 +268,12 @@ class VisualizerApp:
     def set_status(self, message: str):
         self.status_message = message
 
-    def set_playback_info(self, filename: str, duration: float):
-        self.current_file = filename
+    def set_playback_info(self, filename: str, duration: float, title: str = '', composer: str = '', game: str = ''):
+        # Use title if available, otherwise use filename
+        self.current_file = title if title else filename
         self.total_duration = duration
+        self.composer = composer
+        self.game = game
 
     def set_progress(self, progress: float, elapsed: float):
         self.elapsed_time = elapsed
@@ -1036,54 +1041,79 @@ class VisualizerApp:
     def _draw_status_bar(self, x, y, w, h):
         """Draw status bar with branding and info."""
         dpi = getattr(self, 'dpi_scale', 1.0)
+        pad = 8
+        line_height = 18  # Spacing between metadata rows
 
         # Background
         self._draw_rect(x, y, w, h, self.COLORS['panel'])
 
-        # Branding - FM-90s in cyan/blue (Neuropol font) - top left
-        fm90s_color = (0.0, 0.24, 0.67, 1.0)  # Deep Sega blue
-        self._draw_text_glowing("FM-90s", x + int(10 * dpi), y + int(10 * dpi), fm90s_color, font=self.font_fm90s, glow_strength=0.8)
+        label_color = (0.5, 0.5, 0.5, 1.0)
+        fm90s_color = (0.0, 0.24, 0.67, 1.0)
+        engine_color = (1.0, 0.2, 0.2, 1.0)
 
-        # Genesis Engine in Sega red (NiseGenesis font) - centered
-        engine_color = (1.0, 0.2, 0.2, 1.0)  # Sega red
+        # === LEFT COLUMN ===
+        # FM-90s branding (top row)
+        self._draw_text_glowing("FM-90s", x + pad, y + 2, fm90s_color, font=self.font_fm90s, glow_strength=0.8)
+        # Status message + FPS (bottom row)
+        self._draw_text(self.status_message, x + pad, y + 44, self.COLORS['white'], self.font)
+        fps_str = f"({self.current_fps:.0f})"
+        fps_color = (0.4, 0.4, 0.4, 1.0) if self.current_fps >= 55 else (1.0, 0.3, 0.3, 1.0)
+        status_w = self.font.size(self.status_message)[0]
+        self._draw_text(fps_str, x + pad + status_w + 4, y + 44, fps_color, self.font)
+
+        # === CENTER COLUMN ===
+        # GENESIS ENGINE (top row)
         engine_text = "GENESIS ENGINE"
         engine_width = self.font_genesis.size(engine_text)[0]
         engine_x = x + (w - engine_width) // 2
-        self._draw_text_glowing(engine_text, engine_x, y + int(12 * dpi), engine_color, font=self.font_genesis, glow_strength=0.8)
+        self._draw_text_glowing(engine_text, engine_x, y + 4, engine_color, font=self.font_genesis, glow_strength=0.8)
 
-        # Status message - below FM-90s on left side
-        self._draw_text(self.status_message, x + int(10 * dpi), y + int(38 * dpi), self.COLORS['white'])
-
-        # Filename
-        if self.current_file:
-            self._draw_text(self.current_file, x + w - int(300 * dpi), y + int(10 * dpi), self.COLORS['dim'])
-
-        # Progress bar
+        # Progress bar and time (bottom row)
         if self.total_duration > 0:
             progress = min(1.0, self.elapsed_time / self.total_duration)
-            bar_width = int(200 * dpi)
-            bar_height = int(8 * dpi)
-            bar_x = x + w - int(220 * dpi)
-            bar_y = y + int(30 * dpi)
+            bar_width = 180
+            bar_height = 10
+            bar_x = x + (w - bar_width) // 2
+            bar_y = y + 48
 
-            # Background
-            self._draw_rect(bar_x, bar_y, bar_width, bar_height, (0.2, 0.2, 0.25, 1.0))
-            # Progress
-            if progress > 0:
-                self._draw_rect(bar_x, bar_y, bar_width * progress, bar_height, (0.2, 0.8, 1.0, 1.0))
-
-            # Time
             mins = int(self.elapsed_time) // 60
             secs = int(self.elapsed_time) % 60
             total_mins = int(self.total_duration) // 60
             total_secs = int(self.total_duration) % 60
-            time_str = f"{mins}:{secs:02d} / {total_mins}:{total_secs:02d}"
-            self._draw_text(time_str, bar_x - int(100 * dpi), bar_y - int(2 * dpi), self.COLORS['dim'], self.font_small)
+            time_str = f"{mins}:{secs:02d}/{total_mins}:{total_secs:02d}"
+            time_w = self.font.size(time_str)[0]
+            self._draw_text(time_str, bar_x - time_w - 8, y + 44, self.COLORS['dim'], self.font)
 
-        # FPS counter - top right corner
-        fps_str = f"{self.current_fps:.1f} FPS"
-        fps_color = self.COLORS['dim'] if self.current_fps >= 55 else (1.0, 0.3, 0.3, 1.0)
-        self._draw_text(fps_str, x + w - int(70 * dpi), y + int(38 * dpi), fps_color, self.font_small)
+            self._draw_rect(bar_x, bar_y, bar_width, bar_height, (0.2, 0.2, 0.25, 1.0))
+            if progress > 0:
+                self._draw_rect(bar_x, bar_y, bar_width * progress, bar_height, (0.2, 0.8, 1.0, 1.0))
+
+        # === RIGHT COLUMN: Title, Composer, Game (stacked, right-aligned) ===
+        right_x = x + w - pad
+        cur_y = y + 4
+
+        if self.current_file:
+            label = "Title: "
+            label_w = self.font_small.size(label)[0]
+            value_w = self.font_small.size(self.current_file)[0]
+            self._draw_text(label, right_x - label_w - value_w, cur_y, label_color, self.font_small)
+            self._draw_text(self.current_file, right_x - value_w, cur_y, self.COLORS['white'], self.font_small)
+            cur_y += line_height
+
+        if self.composer:
+            label = "Composer: "
+            label_w = self.font_small.size(label)[0]
+            value_w = self.font_small.size(self.composer)[0]
+            self._draw_text(label, right_x - label_w - value_w, cur_y, label_color, self.font_small)
+            self._draw_text(self.composer, right_x - value_w, cur_y, self.COLORS['white'], self.font_small)
+            cur_y += line_height
+
+        if self.game:
+            label = "Game: "
+            label_w = self.font_small.size(label)[0]
+            value_w = self.font_small.size(self.game)[0]
+            self._draw_text(label, right_x - label_w - value_w, cur_y, label_color, self.font_small)
+            self._draw_text(self.game, right_x - value_w, cur_y, self.COLORS['white'], self.font_small)
 
     def _apply_zoom_shader(self):
         """Apply zoom/pulse effect to content (before CRT effects)."""

@@ -147,6 +147,39 @@ def decompress_vgz(data):
     return data
 
 
+def parse_gd3_tag(data, gd3_offset):
+    """Parse GD3 tag for metadata (title, composer, etc.)."""
+    if gd3_offset == 0 or gd3_offset >= len(data):
+        return {}
+
+    # Check GD3 signature
+    if data[gd3_offset:gd3_offset + 4] != b'Gd3 ':
+        return {}
+
+    # GD3 data starts after signature (4), version (4), and length (4)
+    gd3_data_start = gd3_offset + 12
+    gd3_length = struct.unpack('<I', data[gd3_offset + 8:gd3_offset + 12])[0]
+    gd3_data = data[gd3_data_start:gd3_data_start + gd3_length]
+
+    # Parse UTF-16LE strings separated by null terminators
+    # Order: track_en, track_jp, game_en, game_jp, system_en, system_jp,
+    #        author_en, author_jp, date, creator, notes
+    try:
+        strings = gd3_data.decode('utf-16-le').split('\x00')
+    except:
+        return {}
+
+    result = {}
+    if len(strings) > 0 and strings[0]:
+        result['title'] = strings[0]
+    if len(strings) > 2 and strings[2]:
+        result['game'] = strings[2]
+    if len(strings) > 6 and strings[6]:
+        result['composer'] = strings[6]
+
+    return result
+
+
 def parse_vgm_header(data):
     """Parse VGM header."""
     if data[:4] != b'Vgm ':
@@ -154,6 +187,10 @@ def parse_vgm_header(data):
 
     version = struct.unpack('<I', data[0x08:0x0C])[0]
     total_samples = struct.unpack('<I', data[0x18:0x1C])[0]
+
+    # GD3 offset is relative to 0x14
+    gd3_offset_rel = struct.unpack('<I', data[0x14:0x18])[0]
+    gd3_offset = (0x14 + gd3_offset_rel) if gd3_offset_rel else 0
 
     # Loop offset is relative to 0x1C
     loop_offset_rel = struct.unpack('<I', data[0x1C:0x20])[0]
@@ -168,6 +205,9 @@ def parse_vgm_header(data):
     else:
         data_offset = 0x40
 
+    # Parse GD3 metadata
+    gd3 = parse_gd3_tag(data, gd3_offset)
+
     return {
         'version': version,
         'data_offset': data_offset,
@@ -175,6 +215,9 @@ def parse_vgm_header(data):
         'duration': total_samples / 44100.0,
         'loop_offset': loop_offset,
         'loop_samples': loop_samples,
+        'title': gd3.get('title', ''),
+        'game': gd3.get('game', ''),
+        'composer': gd3.get('composer', ''),
     }
 
 
@@ -1838,7 +1881,13 @@ def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_en
         interceptor.on_audio_output = on_audio
 
     filename = os.path.basename(vgm_path)
-    app.set_playback_info(filename, total_duration)
+    app.set_playback_info(
+        filename,
+        total_duration,
+        title=header.get('title', ''),
+        composer=header.get('composer', ''),
+        game=header.get('game', '')
+    )
     app.set_status("Offline playback" + (" with audio" if audio_enabled else ""))
 
     interceptor.start()
