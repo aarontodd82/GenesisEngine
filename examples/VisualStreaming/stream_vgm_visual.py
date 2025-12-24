@@ -17,6 +17,10 @@ Usage:
     python stream_vgm_visual.py song.vgz --port /dev/ttyUSB0
 """
 
+# Suppress deprecation warnings from dependencies
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
 import argparse
 import glob
 import gzip
@@ -1725,13 +1729,14 @@ def run_offline_recording(vgm_path, record_file, loop_count=None, crt_enabled=Tr
     import numpy as np
 
     # Calculate dimensions and portrait mode based on aspect ratio
+    # All based on 1600px reference to match high-DPI display quality
     aspect_configs = {
-        '16:9': (1920, 1080, False),
-        '4:3': (1440, 1080, False),
-        '4:5': (1080, 1350, True),
-        '9:16': (1080, 1920, True),
+        '16:9': (2844, 1600, False),
+        '4:3': (2134, 1600, False),
+        '4:5': (1280, 1600, True),
+        '9:16': (1600, 2844, True),
     }
-    width, height, portrait_mode = aspect_configs.get(aspect, (1920, 1080, False))
+    width, height, portrait_mode = aspect_configs.get(aspect, (2844, 1600, False))
 
     print(f"Recording: {record_file} ({width}x{height}, {aspect})")
 
@@ -1758,7 +1763,7 @@ def run_offline_recording(vgm_path, record_file, loop_count=None, crt_enabled=Tr
     print(f"Frames to render: {total_frames}")
 
     # Create visualizer and interceptor
-    app = VisualizerApp(crt_enabled=crt_enabled, portrait_mode=portrait_mode)
+    app = VisualizerApp(crt_enabled=crt_enabled, portrait_mode=portrait_mode, recording_mode=True)
     interceptor = CommandInterceptor()
 
     # Connect callbacks
@@ -1806,10 +1811,11 @@ def run_offline_recording(vgm_path, record_file, loop_count=None, crt_enabled=Tr
         '-pix_fmt', 'rgb24',
         '-r', '60',
         '-i', 'pipe:0',
-        '-c:v', 'libx264',
-        '-preset', 'fast',
-        '-crf', '18',
-        '-pix_fmt', 'yuv420p',
+        '-c:v', 'libx265',        # H.265 for better compression
+        '-preset', 'slow',        # Good quality/speed balance
+        '-crf', '14',             # Very high quality (lower = better)
+        '-pix_fmt', 'yuv444p',    # Full chroma, no color subsampling
+        '-tag:v', 'hvc1',         # Required for Apple/QuickTime compatibility
         temp_video
     ]
 
@@ -2264,7 +2270,7 @@ Looping:
     parser.add_argument('--fullscreen', '-f', action='store_true',
                         help='Start in fullscreen mode')
     parser.add_argument('--record', choices=['16:9', '4:3', '4:5', '9:16'],
-                        help='Record video at aspect ratio: 16:9 (1920x1080), 4:3 (1440x1080), 4:5 (1080x1350), 9:16 (1080x1920). Output filename derived from input.')
+                        help='Record video at aspect ratio: 16:9 (2844x1600), 4:3 (2134x1600), 4:5 (1280x1600), 9:16 (1600x2844). H.265 encoded.')
 
     args = parser.parse_args()
 

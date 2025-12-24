@@ -11,6 +11,8 @@ from typing import Optional, Callable
 import threading
 import queue
 
+# Suppress pygame welcome message
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "1"
 import pygame
 from pygame.locals import *
 from OpenGL.GL import *
@@ -94,17 +96,17 @@ void main() {
     float brightness = dot(color, vec3(0.299, 0.587, 0.114));
     color += bloom * brightness * 0.3;
 
-    // Scanlines - 2.5 screen pixels per scanline, 25% contrast
+    // Scanlines - consistent count regardless of resolution (based on 1600p reference)
     // Uses distorted uv so scanlines warp with barrel distortion (authentic CRT)
-    float scanlinePos = uv.y * resolution.y / 2.5;
+    float scanlinePos = uv.y * 1600.0 / 2.5;  // Fixed 640 scanlines at any resolution
     float scanline = sin(scanlinePos * 3.14159);
     float scanlineMask = 0.75 + 0.25 * smoothstep(-0.5, 0.5, scanline);
     scanlineMask = mix(scanlineMask, 1.0, brightness * 0.4);  // Bright areas show less scanline
     color *= scanlineMask;
 
-    // Phosphor/aperture grille - 6 pixel triads, 28% blend
+    // Phosphor/aperture grille - consistent count regardless of resolution (based on 2560p reference)
     // Uses distorted uv so phosphors warp with barrel distortion (authentic CRT)
-    float pixelX = uv.x * resolution.x / 2.0;
+    float pixelX = uv.x * 2560.0 / 2.0;  // Fixed phosphor count at any resolution
     int subpixel = int(mod(pixelX, 3.0));
     vec3 phosphorMask;
     if (subpixel == 0) {
@@ -168,10 +170,11 @@ class VisualizerApp:
         'dim': (0.5, 0.5, 0.6, 1.0),
     }
 
-    def __init__(self, crt_enabled: bool = True, portrait_mode: bool = False):
+    def __init__(self, crt_enabled: bool = True, portrait_mode: bool = False, recording_mode: bool = False):
         # CRT shader toggle (on by default)
         self.crt_enabled = crt_enabled
         self.portrait_mode = portrait_mode
+        self.recording_mode = recording_mode
 
         # Waveform data
         self.waveforms = [np.zeros(self.WAVEFORM_SAMPLES, dtype=np.float32)
@@ -394,20 +397,18 @@ class VisualizerApp:
         self.font = pygame.font.SysFont('consolas', int(14 * dpi))
         self.font_small = pygame.font.SysFont('consolas', int(12 * dpi))
         # Specific fonts for branding
-        # FM-90s uses Neuropol, Genesis Engine uses NiseGenesis
+        # SiliconMelody uses Neuropol, Genesis Engine uses NiseGenesis
         try:
             self.font_fm90s = pygame.font.SysFont('Neuropol', int(26 * dpi))
-            print("Using Neuropol for FM-90s")
+            self.font_fm90s_large = pygame.font.SysFont('Neuropol', int(42 * dpi))
         except:
             self.font_fm90s = pygame.font.SysFont('Impact', int(26 * dpi), bold=True)
-            print("Neuropol not found, using Impact")
+            self.font_fm90s_large = pygame.font.SysFont('Impact', int(42 * dpi), bold=True)
 
         try:
             self.font_genesis = pygame.font.SysFont('NiseGenesis', int(24 * dpi))
-            print("Using NiseGenesis for Genesis Engine")
         except:
             self.font_genesis = pygame.font.SysFont('Impact', int(24 * dpi), bold=True)
-            print("NiseGenesis not found, using Impact")
 
         # Fallback brand font
         self.font_brand = pygame.font.SysFont('Impact', int(24 * dpi), bold=True)
@@ -419,7 +420,6 @@ class VisualizerApp:
             zoom_vert = shaders.compileShader(CRT_VERTEX_SHADER, GL_VERTEX_SHADER)
             zoom_frag = shaders.compileShader(ZOOM_FRAGMENT_SHADER, GL_FRAGMENT_SHADER)
             self.zoom_shader = shaders.compileProgram(zoom_vert, zoom_frag)
-            print("Zoom shader compiled successfully")
         except Exception as e:
             print(f"Zoom shader compile error: {e}")
             self.zoom_shader = None
@@ -429,7 +429,6 @@ class VisualizerApp:
             crt_vert = shaders.compileShader(CRT_VERTEX_SHADER, GL_VERTEX_SHADER)
             crt_frag = shaders.compileShader(CRT_FRAGMENT_SHADER, GL_FRAGMENT_SHADER)
             self.crt_shader = shaders.compileProgram(crt_vert, crt_frag)
-            print("CRT shader compiled successfully")
         except Exception as e:
             print(f"CRT shader compile error: {e}")
             self.crt_shader = None
@@ -1078,10 +1077,15 @@ class VisualizerApp:
         engine_color = (1.0, 0.2, 0.2, 1.0)
 
         # === LEFT COLUMN ===
-        # FM-90s branding (top row)
-        self._draw_text_glowing("FM-90s", x + pad, y + 2, fm90s_color, font=self.font_fm90s, glow_strength=0.8)
-        # Status message + FPS (bottom row) - skip in portrait mode
-        if not self.portrait_mode:
+        # SiliconMelody branding - larger and centered when recording
+        if self.recording_mode:
+            sm_font = self.font_fm90s_large
+            sm_height = sm_font.get_height()
+            sm_y = y + (h - sm_height) // 2
+            self._draw_text_glowing("SiliconMelody", x + pad, sm_y, fm90s_color, font=sm_font, glow_strength=0.8)
+        else:
+            self._draw_text_glowing("SiliconMelody", x + pad, y + 2, fm90s_color, font=self.font_fm90s, glow_strength=0.8)
+            # Status message + FPS (bottom row)
             self._draw_text(self.status_message, x + pad, y + 44, self.COLORS['white'], self.font)
             fps_str = f"({self.current_fps:.0f})"
             fps_color = (0.4, 0.4, 0.4, 1.0) if self.current_fps >= 55 else (1.0, 0.3, 0.3, 1.0)
