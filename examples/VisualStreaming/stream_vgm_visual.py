@@ -1165,7 +1165,7 @@ class VisualStreamer:
         self.loop_count = loop_count
 
         # Create visualizer app
-        self.app = VisualizerApp(crt_enabled=crt_enabled)
+        self.app = VisualizerApp(crt_enabled=crt_enabled, portrait_mode=portrait)
 
         # Create command interceptor
         self.interceptor = CommandInterceptor()
@@ -1748,7 +1748,7 @@ def run_offline_recording(vgm_path, record_file, loop_count=None, crt_enabled=Tr
     print(f"Frames to render: {total_frames}")
 
     # Create visualizer and interceptor
-    app = VisualizerApp(crt_enabled=crt_enabled)
+    app = VisualizerApp(crt_enabled=crt_enabled, portrait_mode=portrait)
     interceptor = CommandInterceptor()
 
     # Connect callbacks
@@ -2035,7 +2035,7 @@ def run_offline_visualizer(vgm_path, loop_count=None, crt_enabled=True, audio_en
     print(f"Commands: {len(commands)}")
 
     # Create visualizer and interceptor
-    app = VisualizerApp(crt_enabled=crt_enabled)
+    app = VisualizerApp(crt_enabled=crt_enabled, portrait_mode=portrait)
     interceptor = CommandInterceptor()
 
     # Audio buffer latency compensation

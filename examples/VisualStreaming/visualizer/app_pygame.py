@@ -168,9 +168,10 @@ class VisualizerApp:
         'dim': (0.5, 0.5, 0.6, 1.0),
     }
 
-    def __init__(self, crt_enabled: bool = True):
+    def __init__(self, crt_enabled: bool = True, portrait_mode: bool = False):
         # CRT shader toggle (on by default)
         self.crt_enabled = crt_enabled
+        self.portrait_mode = portrait_mode
 
         # Waveform data
         self.waveforms = [np.zeros(self.WAVEFORM_SAMPLES, dtype=np.float32)
@@ -200,9 +201,10 @@ class VisualizerApp:
 
         self._lock = threading.Lock()
         self.valid_samples = [0] * self.TOTAL_CHANNELS
-        self.default_display_samples = 256  # Normal window - shows frequency changes
-        self.max_display_samples = 1024  # Cap for very low frequencies
-        self.scroll_display_samples = 4096  # ~93ms at 44.1kHz - human-perceivable scroll rate
+        # Portrait mode uses fewer samples since boxes are narrower
+        self.default_display_samples = 128 if portrait_mode else 256
+        self.max_display_samples = 512 if portrait_mode else 1024
+        self.scroll_display_samples = 2048 if portrait_mode else 4096
 
         # Per-channel adaptive display samples (only expands for low frequencies)
         self.channel_display_samples = [self.default_display_samples] * self.TOTAL_CHANNELS
@@ -971,7 +973,8 @@ class VisualizerApp:
         """Render the main scene to framebuffer."""
         dpi = getattr(self, 'dpi_scale', 1.0)
         padding = int(10 * dpi)
-        status_height = int(60 * dpi)
+        # Portrait mode gets taller status bar since it's wider relative to content
+        status_height = int(80 * dpi) if self.portrait_mode else int(60 * dpi)
         keyboard_width = int(50 * dpi)
 
         available_height = self.height - status_height - padding * 2
@@ -984,12 +987,14 @@ class VisualizerApp:
         fm_height_per_channel = (available_height * 0.75) / fm_rows
         psg_height = available_height * 0.25
 
-        # Calculate widths so FM and PSG span the same total width
-        # FM: 2 boxes with 1 gap = 2 boxes + 1 padding
-        # PSG: 4 boxes with 3 gaps = 4 boxes + 3 paddings
-        # Both should span: available_width
-        fm_width = (available_width - padding) / fm_cols  # 2 boxes, 1 gap
-        psg_width = (available_width - padding * 3) / psg_cols  # 4 boxes, 3 gaps
+        # Calculate widths so channel boxes align with status bar right edge
+        # Each FM "cell" includes the box plus right margin (padding)
+        # But the rightmost box shouldn't have a right margin, so we add padding back
+        # Formula: 2 cells span available_width, with 1 gap between boxes
+        # cell_width = (available_width + padding) / 2, drawn_width = cell_width - padding
+        # This gives: 2 drawn boxes + 1 gap = available_width
+        fm_width = (available_width + padding) / fm_cols  # Cell width (includes right margin)
+        psg_width = (available_width - padding * 3) / psg_cols  # 4 boxes, 3 gaps (unused)
 
         # Calculate global amplitude for pulse using envelope follower
         # Use RMS of loudest active channels for better musical response
@@ -1075,12 +1080,13 @@ class VisualizerApp:
         # === LEFT COLUMN ===
         # FM-90s branding (top row)
         self._draw_text_glowing("FM-90s", x + pad, y + 2, fm90s_color, font=self.font_fm90s, glow_strength=0.8)
-        # Status message + FPS (bottom row)
-        self._draw_text(self.status_message, x + pad, y + 44, self.COLORS['white'], self.font)
-        fps_str = f"({self.current_fps:.0f})"
-        fps_color = (0.4, 0.4, 0.4, 1.0) if self.current_fps >= 55 else (1.0, 0.3, 0.3, 1.0)
-        status_w = self.font.size(self.status_message)[0]
-        self._draw_text(fps_str, x + pad + status_w + 4, y + 44, fps_color, self.font)
+        # Status message + FPS (bottom row) - skip in portrait mode
+        if not self.portrait_mode:
+            self._draw_text(self.status_message, x + pad, y + 44, self.COLORS['white'], self.font)
+            fps_str = f"({self.current_fps:.0f})"
+            fps_color = (0.4, 0.4, 0.4, 1.0) if self.current_fps >= 55 else (1.0, 0.3, 0.3, 1.0)
+            status_w = self.font.size(self.status_message)[0]
+            self._draw_text(fps_str, x + pad + status_w + 4, y + 44, fps_color, self.font)
 
         # === CENTER COLUMN ===
         # GENESIS ENGINE (top row)
@@ -1112,29 +1118,32 @@ class VisualizerApp:
         # === RIGHT COLUMN: Title, Composer, Game (stacked, right-aligned) ===
         right_x = x + w - pad
         cur_y = y + 4
+        # Use larger font in portrait mode
+        meta_font = self.font if self.portrait_mode else self.font_small
+        meta_line_height = 22 if self.portrait_mode else line_height
 
         if self.current_file:
             label = "Title: "
-            label_w = self.font_small.size(label)[0]
-            value_w = self.font_small.size(self.current_file)[0]
-            self._draw_text(label, right_x - label_w - value_w, cur_y, label_color, self.font_small)
-            self._draw_text(self.current_file, right_x - value_w, cur_y, self.COLORS['white'], self.font_small)
-            cur_y += line_height
+            label_w = meta_font.size(label)[0]
+            value_w = meta_font.size(self.current_file)[0]
+            self._draw_text(label, right_x - label_w - value_w, cur_y, label_color, meta_font)
+            self._draw_text(self.current_file, right_x - value_w, cur_y, self.COLORS['white'], meta_font)
+            cur_y += meta_line_height
 
         if self.composer:
             label = "Composer: "
-            label_w = self.font_small.size(label)[0]
-            value_w = self.font_small.size(self.composer)[0]
-            self._draw_text(label, right_x - label_w - value_w, cur_y, label_color, self.font_small)
-            self._draw_text(self.composer, right_x - value_w, cur_y, self.COLORS['white'], self.font_small)
-            cur_y += line_height
+            label_w = meta_font.size(label)[0]
+            value_w = meta_font.size(self.composer)[0]
+            self._draw_text(label, right_x - label_w - value_w, cur_y, label_color, meta_font)
+            self._draw_text(self.composer, right_x - value_w, cur_y, self.COLORS['white'], meta_font)
+            cur_y += meta_line_height
 
         if self.game:
             label = "Game: "
-            label_w = self.font_small.size(label)[0]
-            value_w = self.font_small.size(self.game)[0]
-            self._draw_text(label, right_x - label_w - value_w, cur_y, label_color, self.font_small)
-            self._draw_text(self.game, right_x - value_w, cur_y, self.COLORS['white'], self.font_small)
+            label_w = meta_font.size(label)[0]
+            value_w = meta_font.size(self.game)[0]
+            self._draw_text(label, right_x - label_w - value_w, cur_y, label_color, meta_font)
+            self._draw_text(self.game, right_x - value_w, cur_y, self.COLORS['white'], meta_font)
 
     def _apply_zoom_shader(self):
         """Apply zoom/pulse effect to content (before CRT effects)."""
