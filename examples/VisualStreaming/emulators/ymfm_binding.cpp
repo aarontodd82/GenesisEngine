@@ -61,12 +61,19 @@ public:
         output.clear();
         m_fm.output(output, 0, 32767, 0x3F);  // All 6 channels with panning
 
-        // Handle DAC - add to stereo mix when enabled
+        // Handle DAC - add to stereo mix when enabled, respecting channel 6 panning
         if (m_dac_enable) {
             int16_t dac_signed = int16_t(m_dac_data << 7) >> 7;
             int32_t dacval = static_cast<int32_t>(dac_signed) * 32;
-            output.data[0] += dacval;
-            output.data[1] += dacval;
+
+            // Get channel 6 panning from register $B6 port 1
+            // Channel 6 offset = 2 + 0x100 (ch % 3 + 0x100 * (ch / 3) where ch=5)
+            uint32_t ch6_offs = 2 + 0x100;
+            bool pan_left = m_fm.regs().ch_output_1(ch6_offs) != 0;   // Bit 6
+            bool pan_right = m_fm.regs().ch_output_0(ch6_offs) != 0;  // Bit 7
+
+            if (pan_left) output.data[0] += dacval;
+            if (pan_right) output.data[1] += dacval;
         }
     }
 

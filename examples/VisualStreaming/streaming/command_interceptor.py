@@ -288,7 +288,7 @@ class CommandInterceptor:
             stereo *= 0.45
             # Add PSG to stereo mix (PSG is mono, sum and add to both channels)
             psg_mix = psg_waves[0] + psg_waves[1] + psg_waves[2] + psg_waves[3]
-            psg_mix *= 0.15  # Scale PSG relative to FM
+            psg_mix *= 0.10  # Scale PSG relative to FM
             stereo[:, 0] += psg_mix
             stereo[:, 1] += psg_mix
             # Clip and copy to buffer

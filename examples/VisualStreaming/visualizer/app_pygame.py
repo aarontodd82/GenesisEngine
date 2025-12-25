@@ -400,10 +400,10 @@ class VisualizerApp:
         # SiliconMelody uses Neuropol, Genesis Engine uses NiseGenesis
         try:
             self.font_fm90s = pygame.font.SysFont('Neuropol', int(26 * dpi))
-            self.font_fm90s_large = pygame.font.SysFont('Neuropol', int(42 * dpi))
+            self.font_fm90s_large = pygame.font.SysFont('Neuropol', int(28 * dpi))
         except:
             self.font_fm90s = pygame.font.SysFont('Impact', int(26 * dpi), bold=True)
-            self.font_fm90s_large = pygame.font.SysFont('Impact', int(42 * dpi), bold=True)
+            self.font_fm90s_large = pygame.font.SysFont('Impact', int(28 * dpi), bold=True)
 
         try:
             self.font_genesis = pygame.font.SysFont('NiseGenesis', int(24 * dpi))
@@ -1066,8 +1066,8 @@ class VisualizerApp:
     def _draw_status_bar(self, x, y, w, h):
         """Draw status bar with branding and info."""
         dpi = getattr(self, 'dpi_scale', 1.0)
-        pad = 8
-        line_height = 18  # Spacing between metadata rows
+        pad = int(8 * dpi)
+        line_height = int(15 * dpi)  # Spacing between metadata rows
 
         # Background
         self._draw_rect(x, y, w, h, self.COLORS['panel'])
@@ -1084,28 +1084,28 @@ class VisualizerApp:
             sm_y = y + (h - sm_height) // 2
             self._draw_text_glowing("SiliconMelody", x + pad, sm_y, fm90s_color, font=sm_font, glow_strength=0.8)
         else:
-            self._draw_text_glowing("SiliconMelody", x + pad, y + 2, fm90s_color, font=self.font_fm90s, glow_strength=0.8)
+            self._draw_text_glowing("SiliconMelody", x + pad, y + int(2 * dpi), fm90s_color, font=self.font_fm90s, glow_strength=0.8)
             # Status message + FPS (bottom row)
-            self._draw_text(self.status_message, x + pad, y + 44, self.COLORS['white'], self.font)
+            self._draw_text(self.status_message, x + pad, y + int(44 * dpi), self.COLORS['white'], self.font)
             fps_str = f"({self.current_fps:.0f})"
             fps_color = (0.4, 0.4, 0.4, 1.0) if self.current_fps >= 55 else (1.0, 0.3, 0.3, 1.0)
             status_w = self.font.size(self.status_message)[0]
-            self._draw_text(fps_str, x + pad + status_w + 4, y + 44, fps_color, self.font)
+            self._draw_text(fps_str, x + pad + status_w + int(4 * dpi), y + int(44 * dpi), fps_color, self.font)
 
         # === CENTER COLUMN ===
         # GENESIS ENGINE (top row)
         engine_text = "GENESIS ENGINE"
         engine_width = self.font_genesis.size(engine_text)[0]
         engine_x = x + (w - engine_width) // 2
-        self._draw_text_glowing(engine_text, engine_x, y + 4, engine_color, font=self.font_genesis, glow_strength=0.8)
+        self._draw_text_glowing(engine_text, engine_x, y + int(4 * dpi), engine_color, font=self.font_genesis, glow_strength=0.8)
 
         # Progress bar and time (bottom row)
         if self.total_duration > 0:
             progress = min(1.0, self.elapsed_time / self.total_duration)
-            bar_width = 180
-            bar_height = 10
+            bar_width = int(180 * dpi)
+            bar_height = int(10 * dpi)
             bar_x = x + (w - bar_width) // 2
-            bar_y = y + 48
+            bar_y = y + int(36 * dpi)
 
             mins = int(self.elapsed_time) // 60
             secs = int(self.elapsed_time) % 60
@@ -1113,7 +1113,7 @@ class VisualizerApp:
             total_secs = int(self.total_duration) % 60
             time_str = f"{mins}:{secs:02d}/{total_mins}:{total_secs:02d}"
             time_w = self.font.size(time_str)[0]
-            self._draw_text(time_str, bar_x - time_w - 8, y + 44, self.COLORS['dim'], self.font)
+            self._draw_text(time_str, bar_x - time_w - int(8 * dpi), y + int(32 * dpi), self.COLORS['dim'], self.font)
 
             self._draw_rect(bar_x, bar_y, bar_width, bar_height, (0.2, 0.2, 0.25, 1.0))
             if progress > 0:
@@ -1121,10 +1121,10 @@ class VisualizerApp:
 
         # === RIGHT COLUMN: Title, Composer, Game (stacked, right-aligned) ===
         right_x = x + w - pad
-        cur_y = y + 4
+        cur_y = y + int(4 * dpi)
         # Use larger font in portrait mode
         meta_font = self.font if self.portrait_mode else self.font_small
-        meta_line_height = 22 if self.portrait_mode else line_height
+        meta_line_height = int(17 * dpi) if self.portrait_mode else line_height
 
         if self.current_file:
             label = "Title: "
@@ -1415,6 +1415,14 @@ class VisualizerApp:
         self.height = height
         self.crt_enabled = crt_enabled
         self.offscreen_mode = True
+
+        # Calculate DPI scale based on recording dimensions
+        # Portrait uses 1.0 (original sizing), landscape scales with height
+        # 720p = 1.0 baseline to match default window size
+        if self.portrait_mode:
+            self.dpi_scale = 1.0
+        else:
+            self.dpi_scale = height / 720.0
 
         # Initialize OpenGL with our target resolution
         self._init_gl()
